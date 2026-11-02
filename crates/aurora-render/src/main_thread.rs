@@ -1697,14 +1697,18 @@ fn open_device(
     }
     // Aurora's own pipeline cache on disk (pipeline_cache.rs)
     features |= crate::pipeline_cache::feature(afeat);
-    let max_textures = texture_page_limit(&alim);
+    let in_all_pools = descriptors_in_all_pools(adapter);
+    // Apple's GPUs say integrated too, and are the ones #1622 lifted
+    let shared_memory = adapter.get_info().device_type == wgpu::DeviceType::IntegratedGpu && !cfg!(target_os = "macos");
+    let forced = std::env::var("AURORA_TEXTURE_PAGES").ok();
+    let max_textures = texture_page_limit(&alim, shared_memory, in_all_pools, forced.as_deref());
     // Before the device opens, which is where a driver that dislikes these
     // numbers stops: read back from the crash report (crash/summary.rs).
     log::info!(
         "GPU descriptors: {} in an array, {} sampled per stage, {} in all pools, {max_textures} texture pages",
         alim.max_binding_array_elements_per_shader_stage,
         alim.max_sampled_textures_per_shader_stage,
-        descriptors_in_all_pools(adapter).map_or_else(|| "unknown".to_string(), |n| n.to_string()),
+        in_all_pools.map_or_else(|| "unknown".to_string(), |n| n.to_string()),
     );
     let descriptor = wgpu::DeviceDescriptor {
         label: Some("aurora"),
@@ -1792,10 +1796,42 @@ fn detect_vram_mb(adapter: &wgpu::Adapter) -> Option<u64> {
     (bytes > 0).then_some(bytes / (1024 * 1024))
 }
 
-// Binding-array entries have their own limit; they do not consume the
-// ordinary sampled-texture slots used by frame attachments.
-fn texture_page_limit(limits: &wgpu::Limits) -> u32 {
-    limits.max_binding_array_elements_per_shader_stage.clamp(64, 16384)
+/// Sets a descriptor pool of wgpu-hal holds at least (`POOL_MIN_SETS`,
+/// vulkan/descriptor.rs): the texture pages' pool is this many times their
+/// number, whatever the viewer asks of it.
+const POOL_SETS: u32 = 64;
+/// The other descriptors of the texture pages' set: sampler, location buffer.
+const SET_OTHERS: u32 = 2;
+/// Pages at most on an integrated GPU, in Vulkan. Each page holds 2 MB or
+/// more, so this is 4 GB of textures at the very least, past what such a
+/// card keeps; 0.8.3 ran on Intel Iris Xe with far fewer.
+const INTEGRATED_PAGES: u32 = 2048;
+/// Fewest pages, as the page table needs some to start with.
+const MIN_PAGES: u32 = 64;
+const MAX_PAGES: u32 = 16384;
+
+/// How many texture pages the array holds.
+///
+/// Binding-array entries have their own limit; they do not consume the
+/// ordinary sampled-texture slots used by frame attachments. That limit
+/// alone is not enough. Since #1622 removed the cap from the sampled
+/// textures, Intel's Windows driver has answered out of memory when wgpu
+/// makes the pool for 16,384 pages (64 x 16,384 descriptors at once), with
+/// 195 MB in use: the device is lost before the first frame (#1892). wgpu
+/// does not hold the pool to `maxUpdateAfterBindDescriptorsInAllPools`, so
+/// the pages are. Integrated GPUs also stay under a ceiling of their own, as
+/// the limit they report may not be the one that fails.
+///
+/// `forced` is AURORA_TEXTURE_PAGES: the array's limit still applies, and no
+/// other, to try a number on a card.
+fn texture_page_limit(limits: &wgpu::Limits, shared_memory: bool, in_all_pools: Option<u32>, forced: Option<&str>) -> u32 {
+    let array = limits.max_binding_array_elements_per_shader_stage.clamp(MIN_PAGES, MAX_PAGES);
+    if let Some(pages) = forced.and_then(|pages| pages.trim().parse::<u32>().ok()) {
+        return pages.clamp(MIN_PAGES, array);
+    }
+    let pools = in_all_pools.map_or(u32::MAX, |descriptors| (descriptors / POOL_SETS).saturating_sub(SET_OTHERS));
+    let ceiling = if shared_memory { INTEGRATED_PAGES } else { MAX_PAGES };
+    array.min(pools).min(ceiling).max(MIN_PAGES)
 }
 
 #[cfg(test)]
@@ -1809,9 +1845,48 @@ mod tests {
             max_binding_array_elements_per_shader_stage: 1_000_000,
             ..Default::default()
         };
-        assert_eq!(texture_page_limit(&limits), 16384);
+        assert_eq!(texture_page_limit(&limits, false, None, None), 16384);
         limits.max_binding_array_elements_per_shader_stage = 512;
-        assert_eq!(texture_page_limit(&limits), 512);
+        assert_eq!(texture_page_limit(&limits, false, None, None), 512);
+    }
+
+    fn limits() -> wgpu::Limits {
+        wgpu::Limits {
+            max_binding_array_elements_per_shader_stage: 1_000_000,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_pool_of_texture_pages_stays_within_the_drivers_limit() {
+        // what the pool asks: 64 sets of the pages and the two others
+        let asked = |pages: u32| (pages + SET_OTHERS) * POOL_SETS;
+        for in_all_pools in [1 << 20, 500_000, 65_536] {
+            let pages = texture_page_limit(&limits(), false, Some(in_all_pools), None);
+            assert!(asked(pages) <= in_all_pools, "{pages} pages in {in_all_pools}");
+        }
+        // cards with room lose nothing
+        assert_eq!(texture_page_limit(&limits(), false, Some(201_326_592), None), 16384);
+        assert_eq!(texture_page_limit(&limits(), false, Some(u32::MAX), None), 16384);
+        // a driver that says very little still gets a table
+        assert_eq!(texture_page_limit(&limits(), false, Some(1000), None), MIN_PAGES);
+        assert_eq!(texture_page_limit(&limits(), false, Some(0), None), MIN_PAGES);
+    }
+
+    #[test]
+    fn integrated_gpus_stay_under_their_ceiling_whatever_they_report() {
+        assert_eq!(texture_page_limit(&limits(), true, Some(201_326_592), None), INTEGRATED_PAGES);
+        assert_eq!(texture_page_limit(&limits(), true, None, None), INTEGRATED_PAGES);
+        assert_eq!(texture_page_limit(&limits(), true, Some(65_536), None), 1022);
+    }
+
+    #[test]
+    fn a_forced_number_of_pages_only_keeps_to_the_array() {
+        assert_eq!(texture_page_limit(&limits(), true, Some(65_536), Some(" 8192 ")), 8192);
+        assert_eq!(texture_page_limit(&limits(), true, None, Some("99999")), MAX_PAGES);
+        assert_eq!(texture_page_limit(&limits(), false, None, Some("1")), MIN_PAGES);
+        // not a number: as if unset
+        assert_eq!(texture_page_limit(&limits(), true, None, Some("many")), INTEGRATED_PAGES);
     }
 
     #[test]

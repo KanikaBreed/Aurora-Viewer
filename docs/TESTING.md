@@ -8902,6 +8902,7 @@ What the inventory must show with these scenarios:
 | `AURORA_VRAM_BUDGET_MB=<n>` | The driver's video memory budget taken as n MB, a smaller card on a large one |
 | `AURORA_TEXTURE_SIZING=screen` | Textures sized by their object's diameter on screen times the repeats, as before the Legacy Viewer's sizing |
 | `AURORA_TEXTURE_SLOTS=<n>` | Size of the texture table, to test a full one |
+| `AURORA_TEXTURE_PAGES=<n>` | Texture pages at most, in place of the limit for this card |
 | `AURORA_BANDWIDTH_KBPS=<n>` | Bandwidth setting for this launch, without changing the Preferences |
 | `AURORA_THROTTLE_MAX_KBPS=<n>` | Most bandwidth asked from the simulator for this launch (6,000 by default, up to 50,000) |
 | `AURORA_LIGHT_TILES=0`, `alt` or `check` | Local lights without sorting by screen tile, or check of the sort |
@@ -9003,6 +9004,13 @@ What the inventory must show with these scenarios:
   device, as when a driver gives up on the start (#1892): the same box, then
   a crash report titled "GPU device lost at startup", read at the next start
   off Windows. Its GPU, GPU notice and GPU descriptors rows are what to check.
+- **`AURORA_TEXTURE_PAGES=<n>`** (64 to 16384, or what the card's array
+  allows): replaces the limit for this card, which is 2048 on an integrated
+  GPU and what the driver's descriptor pools hold (#1892). The log's `GPU
+  descriptors:` line gives the number in use. A low number fills the table:
+  `texture pages: all <n> page slots in use` in the log, and textures that
+  stay unloaded. A high one on an affected Intel card loses the device at
+  start: that is how to find the number a driver accepts.
 - **`AURORA_PIPELINE_CACHE=0`**: the renderer makes its pipelines without
   Aurora's cache (`aurora-render/src/pipeline_cache.rs`), as before: the
   driver compiles each one, or takes it from its own disk cache when that

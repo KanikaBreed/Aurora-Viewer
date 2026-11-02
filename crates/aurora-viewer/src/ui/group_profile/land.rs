@@ -236,8 +236,7 @@ fn head_label(ui: &egui::Ui, p: &Palette, text: &str, cell: Rect, right: bool) {
 /// The region and the position in it, as Firestorm's "location" column
 /// ("Sim (x, y)").
 fn location(parcel: &GroupParcel) -> String {
-    let x = (parcel.global_x.round() as i64).rem_euclid(256);
-    let y = (parcel.global_y.round() as i64).rem_euclid(256);
+    let (x, y) = crate::world::region_extent::local(f64::from(parcel.global_x.round()), f64::from(parcel.global_y.round()));
     format!("{} ({x}, {y})", parcel.sim_name)
 }
 
@@ -409,7 +408,8 @@ fn parcels(st: &mut GroupProfileUi, ui: &mut egui::Ui, c: &mut Ctx, data: Option
             ParcelAct::Map => actions.push(GroupAction::ShowOnMap { x, y }),
             ParcelAct::AboutLand => actions.push(GroupAction::AboutLand { x, y }),
             ParcelAct::PlaceProfile => {
-                let pos = glam::Vec3::new(x.rem_euclid(256.0) as f32, y.rem_euclid(256.0) as f32, parcel.global_z);
+                let (lx, ly) = crate::world::region_extent::local(x, y);
+                let pos = glam::Vec3::new(lx as f32, ly as f32, parcel.global_z);
                 context::request(ui.ctx(), CtxAction::ShowPlaceInfo(parcel.sim_name.clone(), pos));
             }
         }

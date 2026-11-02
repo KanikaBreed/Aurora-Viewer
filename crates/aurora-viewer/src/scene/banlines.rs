@@ -119,13 +119,15 @@ impl BanLines {
             return 0;
         };
         let hm = &region.heightmap;
-        let n = hm.size_x / STEP as u32;
+        // cells per row and per column: a large OpenSim region need not be
+        // square, and the collision bitmap's rows are its width
+        let (nx, ny) = (hm.size_x / STEP as u32, hm.size_y / STEP as u32);
         // writeSegmentsFromBitmap: borders between set and clear cells
-        let stride = (n + 1) as usize;
-        let mut seg = vec![0u8; stride * stride];
-        for y in 0..n {
-            for x in 0..n {
-                if c.cell(x, y, n) {
+        let stride = (nx + 1) as usize;
+        let mut seg = vec![0u8; stride * (ny + 1) as usize];
+        for y in 0..ny {
+            for x in 0..nx {
+                if c.cell(x, y, nx) {
                     let o = x as usize + y as usize * stride;
                     seg[o] ^= SOUTH;
                     seg[o + stride] ^= SOUTH;
@@ -141,8 +143,8 @@ impl BanLines {
         let height = if c.kind == 1 || flyover { BAN_HEIGHT } else { PARCEL_HEIGHT };
         let slot = if c.use_pass && c.kind == 3 { tex[1] } else { tex[0] };
         let me = world.agent.position - offset;
-        let border = hm.size_x as f32 - 0.1;
-        let ground = |x: f32, y: f32| hm.sample(x.min(border), y.min(border));
+        let border = (hm.size_x as f32 - 0.1, hm.size_y as f32 - 0.1);
+        let ground = |x: f32, y: f32| hm.sample(x.min(border.0), y.min(border.1));
         let alpha_of = |d2: f32| {
             if d2 < MIN_DIST_SQ {
                 MAX_ALPHA
@@ -153,7 +155,7 @@ impl BanLines {
             }
         };
         let mut used = 0;
-        for y in 0..stride {
+        for y in 0..=ny as usize {
             for x in 0..stride {
                 let m = seg[x + y * stride];
                 for dir in [SOUTH, WEST] {

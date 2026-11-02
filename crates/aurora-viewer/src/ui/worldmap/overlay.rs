@@ -1841,7 +1841,7 @@ impl WorldMapUi {
                 world.map.track_location(x, y, z, false);
                 let name = world.map.sim_at_global(x, y).map(|(_, s)| s.name.clone());
                 if let (Some(t), Some(n)) = (world.map.track.as_mut(), name) {
-                    let (lx, ly) = (x.rem_euclid(256.0), y.rem_euclid(256.0));
+                    let (lx, ly) = crate::world::region_extent::local(x, y);
                     t.label = if label.starts_with(&n) {
                         location_label(&n, lx, ly, z)
                     } else {

@@ -76,8 +76,10 @@ impl Place {
 
     /// The position in the region, for "Region (x, y, z)".
     pub fn region_pos(&self) -> Option<Vec3> {
-        self.global
-            .map(|g| Vec3::new(g.x.rem_euclid(256.0) as f32, g.y.rem_euclid(256.0) as f32, g.z as f32))
+        self.global.map(|g| {
+            let (x, y) = crate::world::region_extent::local(g.x, g.y);
+            Vec3::new(x as f32, y as f32, g.z as f32)
+        })
     }
 
     /// The text the filter looks in: name, region and notes.

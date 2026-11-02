@@ -78,6 +78,7 @@ pub mod radar;
 pub mod received_items;
 pub mod recent;
 pub mod region_alerts;
+pub mod region_extent;
 pub mod region_messages;
 pub mod region_restart;
 pub mod rig_graph;
@@ -625,7 +626,7 @@ fn saved_prefix(timestamp: u32) -> String {
 
 /// The largest region a grid can have (Constants.MaximumRegionSize,
 /// OpenSim): a corrupt patch number must not make a land grid of gigabytes.
-const MAX_REGION_SIZE: u32 = 4096;
+pub(crate) const MAX_REGION_SIZE: u32 = 4096;
 
 impl World {
     pub fn water_visual_dz(&self, id: &Uuid) -> f32 {
@@ -828,6 +829,7 @@ impl World {
         // a setting, not the session's: the arrival's lines follow it too
         let quiet = self.quiet_automated_chat;
         *self = World::new(lib);
+        region_extent::clear();
         self.chat_log = chat_log;
         self.cache_dir = cache_dir;
         self.quiet_automated_chat = quiet;
@@ -1849,6 +1851,8 @@ impl World {
     fn ensure_region(&mut self, h: RegionHandle, size: (u32, u32)) -> &mut Region {
         // the network layer already holds the sizes; this keeps every caller safe
         let size = (size.0.clamp(256, MAX_REGION_SIZE), size.1.clamp(256, MAX_REGION_SIZE));
+        let (x, y) = aurora_net::handle_to_origin(h);
+        region_extent::note(f64::from(x), f64::from(y), size.0, size.1);
         if let Some(region) = self.regions.get_mut(&h)
             && region.heightmap.grow(size.0, size.1)
         {

@@ -326,7 +326,8 @@ fn place(ui: &mut egui::Ui, c: &mut Ctx, parcel: Uuid, tab: Tab, row: Option<&Ro
         },
         global,
         region_pos: global.map_or(glam::Vec3::ZERO, |g| {
-            glam::Vec3::new(g.x.rem_euclid(256.0) as f32, g.y.rem_euclid(256.0) as f32, g.z as f32)
+            let (x, y) = crate::world::region_extent::local(g.x, g.y);
+            glam::Vec3::new(x as f32, y as f32, g.z as f32)
         }),
         stage: Stage::Info(parcel),
     };
@@ -503,11 +504,8 @@ fn event(ui: &mut egui::Ui, c: &mut Ctx, id: u32, row_name: &str, row: Option<&R
         );
         field(ui, p, aurora_i18n::tr!("search-event-organizer"), |ui| agent_link(ui, c, e.creator));
         // "%s (%d, %d, %d)": the region and the position in it
-        let pos = glam::Vec3::new(
-            (e.global.x.round() as i64).rem_euclid(256) as f32,
-            (e.global.y.round() as i64).rem_euclid(256) as f32,
-            e.global.z.round() as f32,
-        );
+        let (x, y) = crate::world::region_extent::local(e.global.x.round(), e.global.y.round());
+        let pos = glam::Vec3::new(x as f32, y as f32, e.global.z.round() as f32);
         field(ui, p, aurora_i18n::tr!("ui-profile-location-2"), |ui| {
             let text = format!("{} ({}, {}, {})", e.sim_name, pos.x, pos.y, pos.z);
             let link = ui.add(egui::Link::new(

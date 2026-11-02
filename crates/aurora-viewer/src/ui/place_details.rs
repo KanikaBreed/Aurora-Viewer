@@ -109,15 +109,12 @@ pub fn maturity(flags: u8) -> &'static str {
 }
 
 /// LLPanelPlaceInfo::processParcelInfo: "%s (%d, %d, %d)" with the position
-/// in the region rounded, or the parcel's global position modulo 256 when
-/// there is none.
+/// in the region rounded, or the parcel's global position in its region
+/// when there is none.
 pub fn region_name_pos(sim_name: &str, pos: glam::Vec3, global: DVec3) -> String {
     let (x, y, z) = if pos == glam::Vec3::ZERO {
-        (
-            (global.x.round() as i64).rem_euclid(256),
-            (global.y.round() as i64).rem_euclid(256),
-            global.z.round() as i64,
-        )
+        let (x, y) = crate::world::region_extent::local(global.x.round(), global.y.round());
+        (x as i64, y as i64, global.z.round() as i64)
     } else {
         (pos.x.round() as i64, pos.y.round() as i64, pos.z.round() as i64)
     };

@@ -136,13 +136,10 @@ fn slot_handle(gx: f64, gy: f64) -> RegionHandle {
 }
 
 /// LLPanelPlaceInfo::displayParcelInfo(region_id, pos_global): the position
-/// in the region is the global one modulo the region width.
+/// in the region, from the corner of the region holding it.
 fn region_pos_of(global: DVec3) -> Vec3 {
-    Vec3::new(
-        global.x.rem_euclid(256.0) as f32,
-        global.y.rem_euclid(256.0) as f32,
-        global.z as f32,
-    )
+    let (x, y) = super::region_extent::local(global.x, global.y);
+    Vec3::new(x as f32, y as f32, global.z as f32)
 }
 
 #[derive(Debug, Default)]

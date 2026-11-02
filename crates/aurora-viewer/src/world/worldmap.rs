@@ -472,6 +472,7 @@ impl WorldMap {
             }
             self.null_sims.remove(&key);
             self.ratings.learn(&b.name, b.access);
+            super::region_extent::note(f64::from(key.0) * 256.0, f64::from(key.1) * 256.0, b.size_x as u32, b.size_y as u32);
             self.sims.insert(
                 key,
                 SimInfo {
@@ -753,9 +754,10 @@ impl WorldMap {
         if self.track_parcel.as_ref().is_some_and(|p| p.x == t.x && p.y == t.y) {
             return;
         }
-        let slot = |g: f64| ((g.max(0.0) / 256.0).floor() as u32) * 256;
-        let handle = aurora_net::origin_to_handle(slot(t.x), slot(t.y));
-        let position = glam::Vec3::new(t.x.rem_euclid(256.0) as f32, t.y.rem_euclid(256.0) as f32, t.z);
+        // the region's corner, not the 256 m slot, on a large region
+        let (cx, cy) = super::region_extent::corner(t.x.max(0.0), t.y.max(0.0));
+        let handle = aurora_net::origin_to_handle(cx as u32, cy as u32);
+        let position = glam::Vec3::new((t.x - cx) as f32, (t.y - cy) as f32, t.z);
         self.track_parcel = Some(TrackParcel {
             x: t.x,
             y: t.y,

@@ -46,11 +46,11 @@ fn place_line(parcel: &str, sim: &str, pos: DVec3) -> String {
     let names: Vec<&str> = [parcel, sim].into_iter().filter(|s| !s.trim().is_empty()).collect();
     let mut s = names.join(" · ");
     if pos != DVec3::ZERO {
-        let local = |v: f64| (v.rem_euclid(256.0)).round() as i64;
+        let (x, y) = crate::world::region_extent::local(pos.x, pos.y);
         if !s.is_empty() {
             s.push(' ');
         }
-        s.push_str(&format!("({}, {}, {})", local(pos.x), local(pos.y), pos.z.round() as i64));
+        s.push_str(&format!("({}, {}, {})", x.round() as i64, y.round() as i64, pos.z.round() as i64));
     }
     s
 }
@@ -543,12 +543,12 @@ fn slurl(region: &str, pos: DVec3) -> Option<String> {
     if pos == DVec3::ZERO || region.trim().is_empty() {
         return None;
     }
-    let local = |v: f64| v.rem_euclid(256.0).round() as i64;
+    let (x, y) = crate::world::region_extent::local(pos.x, pos.y);
     Some(format!(
         "http://maps.secondlife.com/secondlife/{}/{}/{}/{}",
         region.trim().replace(' ', "%20"),
-        local(pos.x),
-        local(pos.y),
+        x.round() as i64,
+        y.round() as i64,
         pos.z.round() as i64
     ))
 }

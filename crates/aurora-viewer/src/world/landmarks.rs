@@ -121,13 +121,21 @@ pub struct Landmarks {
 /// writeAgentParcelFromBitmap reads it) and `origin` is the agent region's
 /// corner; another region is never the agent's parcel.
 pub fn in_parcel(bitmap: &[u8], origin: (u32, u32), pos: DVec3) -> bool {
-    let cells = (bitmap.len() * 8).isqrt();
-    let width = (cells * 4) as f64;
-    let (x, y) = (pos.x - f64::from(origin.0), pos.y - f64::from(origin.1));
-    if cells == 0 || !(0.0..width).contains(&x) || !(0.0..width).contains(&y) {
+    // the bitmap's rows are the region's width: known for a large region,
+    // else a square region is assumed
+    let (ox, oy) = (f64::from(origin.0), f64::from(origin.1));
+    let (cells_x, cells_y) = match super::region_extent::size(ox, oy) {
+        Some((w, h)) if (w / 4) as usize * (h / 4) as usize <= bitmap.len() * 8 => ((w / 4) as usize, (h / 4) as usize),
+        _ => {
+            let cells = (bitmap.len() * 8).isqrt();
+            (cells, cells)
+        }
+    };
+    let (x, y) = (pos.x - ox, pos.y - oy);
+    if cells_x == 0 || !(0.0..(cells_x * 4) as f64).contains(&x) || !(0.0..(cells_y * 4) as f64).contains(&y) {
         return false;
     }
-    let i = (y / 4.0) as usize * cells + (x / 4.0) as usize;
+    let i = (y / 4.0) as usize * cells_x + (x / 4.0) as usize;
     bitmap.get(i / 8).is_some_and(|b| b & (1 << (i % 8)) != 0)
 }
 
@@ -277,7 +285,10 @@ impl Landmarks {
             Some(State::Failed) => Resolved::Failed,
             Some(State::Ready(LandmarkAsset::Global(g))) => Resolved::Ready {
                 region_id: Uuid::nil(),
-                region_pos: Vec3::new(g.x.rem_euclid(256.0) as f32, g.y.rem_euclid(256.0) as f32, g.z as f32),
+                region_pos: {
+                    let (x, y) = super::region_extent::local(g.x, g.y);
+                    Vec3::new(x as f32, y as f32, g.z as f32)
+                },
                 global: *g,
             },
             Some(State::Ready(LandmarkAsset::Region { region_id, pos })) => match self.handles.get(region_id) {
@@ -583,6 +594,20 @@ mod tests {
         let k = l.take_wanted()[0].0;
         l.on_fetch(k, None);
         assert_eq!(l.resolve(other), Resolved::Failed);
+    }
+
+    #[test]
+    fn a_parcel_of_a_region_wider_than_tall_is_read_by_its_rows() {
+        // 512 x 256 m: 128 cells per row, 64 rows
+        let origin = (768_000, 768_000);
+        super::super::region_extent::note(768_000.0, 768_000.0, 512, 256);
+        let mut bitmap = vec![0u8; 128 * 64 / 8];
+        let i = 50 * 128 + 100;
+        bitmap[i / 8] |= 1 << (i % 8);
+        let at = |x: f64, y: f64| DVec3::new(768_000.0 + x, 768_000.0 + y, 20.0);
+        assert!(in_parcel(&bitmap, origin, at(401.0, 201.0)));
+        assert!(!in_parcel(&bitmap, origin, at(401.0, 205.0)), "the row above");
+        assert!(!in_parcel(&bitmap, origin, at(401.0, 260.0)), "past the region's north edge");
     }
 
     #[test]

@@ -1798,6 +1798,7 @@ grids-help = ヘルプ
 grids-about = Webサイト
 grids-search = 検索ＵＲＬ（[QUERY]、[LANGUAGE]、[MATURITY]）
 grids-profile = WebプロフィールのＵＲＬ
+grids-helper = 通貨ヘルパーのＵＲＬ（L$の購入）
 grids-fetch = グリッド情報を取得
 grids-fetching = グリッド情報を取得しています…
 grids-error-address = 認証情報を含まない有効なＨＴＴＰまたはＨＴＴＰＳのアドレスを入力してください。
@@ -4152,6 +4153,7 @@ ui-options-same-sounds-and-defaults-as-firestorm-these-are-second = レガシー
 ui-land-experiences-any-resident-experience-can-be-blocked-blocked-experiences-cannot = 住人の体験はすべてブロックできます。ブロックした体験はこの土地で実行できません。
 build-ui-floaters-anyone = 全員
 build-ui-general-anyone = 全員：
+build-ui-general-export = エクスポート
 build-ui-floaters-anyone-can-copy = 全員がコピー可能
 ui-land-media-web-browser = ウェブブラウザー
 ui-land-objects-count = 数
@@ -10321,6 +10323,8 @@ group-ability-experience-contributor-help = この能力を持つ役割のメン
 
 ## Buying L$
 currency-title = L$ の購入
+currency-region-helper = このリージョンは独自の通貨サービス（{ $host }）を使っています。ここでの購入はあなたとそのサービスとの取引で、そのサービスにはセッション（求められた場合はパスワードも）が送られます。信頼できる場合のみ購入してください。
+currency-service = 通貨サービス: { $host }
 currency-menu = L$ の購入…
 money-tracker-title = 取引ログ
 money-tracker-legacy-title = 取引ログ

@@ -1804,6 +1804,7 @@ grids-help = Aide
 grids-about = Site web
 grids-search = URL de recherche ([QUERY], [LANGUAGE], [MATURITY])
 grids-profile = URL des profils web
+grids-helper = URL du service monétaire (achat de L$)
 grids-fetch = Récupérer les informations de la grille
 grids-fetching = Récupération des informations de la grille…
 grids-error-address = Saisissez une adresse HTTP ou HTTPS valide, sans identifiants.
@@ -4158,6 +4159,7 @@ ui-options-same-sounds-and-defaults-as-firestorm-these-are-second = Mêmes sons 
 ui-land-experiences-any-resident-experience-can-be-blocked-blocked-experiences-cannot = N'importe quelle expérience de résident peut être bloquée. Les expériences bloquées ne peuvent pas s'exécuter sur ce terrain.
 build-ui-floaters-anyone = N'importe qui
 build-ui-general-anyone = N'importe qui :
+build-ui-general-export = Exporter
 build-ui-floaters-anyone-can-copy = N'importe qui peut copier
 ui-land-media-web-browser = Navigateur Web
 ui-land-objects-count = Nbre
@@ -10329,6 +10331,8 @@ group-ability-experience-contributor-help = Les membres dotés d’un rôle avec
 
 ## Achat de L$
 currency-title = Acheter des L$
+currency-region-helper = Cette région utilise son propre service monétaire, sur { $host }. Un achat fait ici se passe entre vous et ce service, qui reçoit aussi votre session (et votre mot de passe s'il le demande) : n'achetez que si vous lui faites confiance.
+currency-service = Service monétaire : { $host }
 currency-menu = Acheter des L$…
 money-tracker-title = Suivi des L$
 money-tracker-legacy-title = Suivi des transactions

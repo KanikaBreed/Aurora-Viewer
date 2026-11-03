@@ -614,6 +614,16 @@ pub enum NetEvent {
         grid_status_page: String,
         /// The rest of an OpenSim region's "OpenSimExtras" this viewer uses.
         opensim: OpenSimExtras,
+        /// "OpenSimExtras" "currency-base-uri": the region's own currency
+        /// helper, ahead of the grid's (LFSimFeatureHandler's
+        /// mHelperUriOverride); empty when not given.
+        currency_base_uri: String,
+        /// "OpenSimExtras" "currency": the region's own money symbol
+        /// (mCurrencySymbolOverride); empty when not given.
+        currency_symbol: String,
+        /// "OpenSimExtras" "ExportSupported": the region honours the export
+        /// permission (LFSimFeatureHandler::simSupportsExport).
+        export_supported: bool,
     },
     HoverHeightUpdated {
         region: RegionHandle,

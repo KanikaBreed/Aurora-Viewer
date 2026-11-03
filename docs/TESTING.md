@@ -4650,6 +4650,7 @@ before (`amis`, `groupes`, `repere`, `historique`…) are still accepted.
 | `AURORA_DEMO_PERF=compact`, `full`, `network` or `monitor-<section>` | Opens the Performance window: compact, the resource monitor, or one of its sections |
 | `AURORA_DEMO_SUITCASE=1` | The question before a Hypergrid teleport that leaves worn items behind |
 | `AURORA_DEMO_BUY_CURRENCY=<mode>` | Demo balance and "Buy L$" window |
+| `AURORA_DEMO_CURRENCY=<symbol>` | An OpenSim grid's own money symbol (KC, OS$…) shown in place of L$ |
 | `AURORA_DEMO_BUY_LAND=<mode>[:confirm]` | Plaza parcel for sale and "Buy Land" window |
 | `AURORA_DEMO_BUY_PASS=sell\|none\|own` | The ground menu's "Buy access" on the plaza parcel |
 | `AURORA_DEMO_PAY=<mode>` | Demo balance and the Pay window of a resident or a group |
@@ -4946,9 +4947,15 @@ before (`amis`, `groupes`, `repere`, `historique`…) are still accepted.
   with a password (OK greyed out as long as it is empty). `direct`: purchase
   without confirmation. `error`: refusal by the service shown in the
   window, with its link. `nopayment`: account without a payment method.
-  `grid`: grid with no known purchase service. After Buy then OK: the
+  `grid`: grid with no known purchase service. `opensim`: an OpenSim grid,
+  the form at once with 1000 entered (no payment method check). After Buy
+  then OK: the
   window closes, the balance goes up and the bell receives the
   notification.
+- **`AURORA_DEMO_CURRENCY=<symbol>`**: the symbol an OpenSim grid names
+  in its login answer (`currency`), shown wherever L$ is: the balance, Buy
+  L$, Pay, Buy Land, prices. Combine with `AURORA_DEMO_BUY_CURRENCY` or
+  `AURORA_DEMO_PAY` to see the windows.
 - **`AURORA_DEMO_BUY_LAND=<mode>[:confirm]`**: the plaza parcel (16384 m²) is for sale
   by a demo resident for L$ 4,500, with its objects, and "Buy Land" opens on it.
   The land service is simulated: nothing is sent, the purchase only moves

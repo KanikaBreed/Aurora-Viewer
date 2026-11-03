@@ -128,7 +128,7 @@ impl Inventory {
         inv
     }
 
-    fn add_folders(&mut self, list: Vec<InvFolder>, library: bool) {
+    pub(crate) fn add_folders(&mut self, list: Vec<InvFolder>, library: bool) {
         for f in list {
             self.upsert_folder(f, library);
         }

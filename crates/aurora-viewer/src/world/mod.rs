@@ -92,6 +92,7 @@ pub mod social;
 pub mod sound_parcels;
 pub mod staff;
 pub mod status;
+pub mod suitcase;
 pub mod teleport_invites;
 pub mod temp_attachments;
 pub mod terrain;

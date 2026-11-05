@@ -47,6 +47,8 @@ pub struct LightView {
     /// Projectors cast shadows (the setting, with the sun's shadows on).
     pub projector_shadows: bool,
     pub projector_shadow_limit: u8,
+    /// Keep lights worn by other residents (Preferences › Graphics).
+    pub others_attached_lights: bool,
 }
 
 /// A light that may enter the frame's list.
@@ -177,18 +179,20 @@ fn spot_priority(position: Vec3, direction: Vec3, radius: f32, view: &LightView)
 
 /// Worn by an avatar: a parent up its link is one (the attachment's root,
 /// or the prim itself; LLViewerObject::isAttachment).
-fn worn(world: &World, o: &crate::world::objects::Object) -> bool {
+fn worn(world: &World, o: &crate::world::objects::Object) -> Option<Uuid> {
     let mut current = o;
     for _ in 0..4 {
-        let Some(parent) = world.objects.parent_of(current).and_then(|i| world.objects.get(i)) else {
-            return false;
-        };
+        let parent = world.objects.parent_of(current).and_then(|i| world.objects.get(i))?;
         if parent.is_avatar() {
-            return true;
+            return Some(parent.full_id);
         }
         current = parent;
     }
-    false
+    None
+}
+
+fn light_visible(wearer: Option<Uuid>, agent: Uuid, photo_attached: bool, others_attached: bool) -> bool {
+    wearer.is_none() || (photo_attached && (others_attached || wearer == Some(agent)))
 }
 
 impl Scene {
@@ -222,7 +226,11 @@ impl Scene {
             let Some((center, hud)) = self.gpu.get(idx).map(|g| (g.center, g.hud)) else {
                 continue;
             };
-            if hud || (!self.attached_lights && worn(world, o)) || !gives_light(l.color, l.radius) {
+            let wearer = worn(world, o);
+            if hud
+                || !light_visible(wearer, world.agent_id, self.attached_lights, view.others_attached_lights)
+                || !gives_light(l.color, l.radius)
+            {
                 continue;
             }
             let dist = light_dist(center, l.radius, eye);
@@ -351,6 +359,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn other_avatar_lights_can_be_hidden_without_hiding_our_own() {
+        let agent = Uuid::from_u128(1);
+        let other = Uuid::from_u128(2);
+        assert!(light_visible(Some(agent), agent, true, false));
+        assert!(!light_visible(Some(other), agent, true, false));
+        assert!(light_visible(Some(other), agent, true, true));
+        assert!(light_visible(None, agent, true, false));
+        assert!(!light_visible(Some(agent), agent, false, true));
+        assert!(!light_visible(Some(other), agent, false, true));
+    }
+
+    #[test]
     fn a_projector_keeps_its_shadow_map_while_it_is_a_target() {
         let mut slots = SpotShadowSlots::default();
         let eye = Vec3::ZERO;
@@ -473,6 +493,7 @@ mod tests {
             dt: 0.016,
             projector_shadows: true,
             projector_shadow_limit: 2,
+            others_attached_lights: true,
         }
     }
 

@@ -1,5 +1,9 @@
 # Aurora Viewer architecture
 
+`ui/stand_button.rs` selects and displays the on-screen Stand / Stop Flying
+control above the bottom bar when seated or flying, hides it in mouselook, and
+uses the same RLVa standing permission and app actions as the existing menus.
+
 World texture/material drops use `Scene::resource_drop_face_at_ray` for one
 consistent object/face hit, including zero-alpha and transparent texel surfaces,
 with HUD ownership, sidedness, distance and terrain occlusion retained. The

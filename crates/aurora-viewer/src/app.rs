@@ -15210,6 +15210,20 @@ impl App {
                         &favorites,
                     )
                 };
+                if chrome.bottom
+                    && let Some((action, enabled)) = ui::stand_button::control(
+                        self.world.agent.is_sitting(),
+                        self.world.agent.flying,
+                        self.camera.mouselook(),
+                        sit_locked,
+                    )
+                    && ui::stand_button::show(&ctx, &p, action, enabled, bottom_top)
+                {
+                    a.bar = match action {
+                        ui::stand_button::Action::StandUp => BarAction::StandUp,
+                        ui::stand_button::Action::StopFlying => BarAction::ToggleFly,
+                    };
+                }
                 // what the bars leave: where the windows are laid out and
                 // snapped this frame (above the dock with the islands)
                 let mut area = ui::layout::bars_room(ui.available_rect_before_wrap(), bottom_top, classic_bars);

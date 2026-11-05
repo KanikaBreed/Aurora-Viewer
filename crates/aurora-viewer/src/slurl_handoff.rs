@@ -174,12 +174,15 @@ fn serve(name: &str, ready: &crossbeam_channel::Sender<bool>, links: &crossbeam_
         ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut descriptor, std::ptr::null_mut())
     };
     if converted == 0 {
-        log::error!(
-            "startup links: cannot create medium-integrity pipe ACL (Windows error {})",
+        // Without the descriptor the pipe keeps the default security (creator
+        // only), as before: links from a non-elevated browser may then be
+        // refused by an elevated viewer, but every other case still works.
+        log::warn!(
+            "startup links: no medium-integrity pipe ACL (Windows error {}), default security kept",
+            // SAFETY: reads the calling thread's last error, no pointer involved.
             unsafe { GetLastError() }
         );
-        let _ = ready.send(false);
-        return;
+        descriptor = std::ptr::null_mut();
     }
     let mut security = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -197,12 +200,14 @@ fn serve(name: &str, ready: &crossbeam_channel::Sender<bool>, links: &crossbeam_
             0,
             MAX_URL as u32,
             0,
-            &mut security,
+            if descriptor.is_null() { std::ptr::null() } else { &mut security },
         )
     };
-    // SAFETY: conversion allocated this descriptor and it is no longer used.
-    unsafe {
-        LocalFree(descriptor.cast());
+    if !descriptor.is_null() {
+        // SAFETY: conversion allocated this descriptor and it is no longer used.
+        unsafe {
+            LocalFree(descriptor.cast());
+        }
     }
     if pipe == INVALID_HANDLE_VALUE {
         // another viewer of this session already receives the links

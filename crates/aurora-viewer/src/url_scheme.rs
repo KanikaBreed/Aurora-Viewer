@@ -35,10 +35,12 @@ pub fn registered_command() -> Option<String> {
     win::registered_command()
 }
 
+#[cfg(any(windows, test))]
 fn should_repair_aurora_registration(exe: &std::path::Path, current: &std::path::Path) -> bool {
     exe.file_name().is_some_and(|n| n.eq_ignore_ascii_case("aurora-viewer.exe")) && !same_executable(exe, current)
 }
 
+#[cfg(any(windows, test))]
 fn same_executable(a: &std::path::Path, b: &std::path::Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
@@ -66,7 +68,7 @@ mod registration_tests {
             Path::new("/Aurora/aurora-viewer.exe")
         ));
         assert!(!should_repair_aurora_registration(
-            Path::new("/Firestorm/firestorm.exe"),
+            Path::new("/Other/other-viewer.exe"),
             Path::new("/Aurora/aurora-viewer.exe")
         ));
     }

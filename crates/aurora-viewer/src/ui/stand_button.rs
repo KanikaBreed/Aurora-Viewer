@@ -1,72 +1,157 @@
-//! On-screen Stand / Stop Flying control.
+//! The on-screen Stand / Stop flying button (#2479), in the middle just above
+//! the bottom bar. Port of LLPanelStandStopFlying (indra/newview/llmoveview.cpp):
+//! Stand while seated, on an object or on the ground, greyed while RLVa keeps
+//! us seated (RlvUIEnabler::onToggleUnsit, indra/newview/rlvui.cpp); otherwise
+//! Stop flying while flying, which RLVa never refuses (LLAgent::setFlying
+//! always lands). Seated wins over flying, as LLFloaterMove::setSittingMode
+//! hides Stop flying. None in mouselook unless the interface stays there
+//! (LLPanelStandStopFlying::setVisible and FSShowInterfaceInMouselook), nor
+//! while the interface is hidden (HideUIControls). Aurora's switch in
+//! Preferences › Layout hides it for good; the Legacy Viewer has none.
 
+use super::widgets::{self, ActionKind};
 use crate::theme::Palette;
-use egui::{Id, Order, Pos2, Vec2};
+use egui::{Align2, Id, Margin, Order, Pos2, Rect, Vec2};
 
+/// What the button does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     StandUp,
     StopFlying,
 }
 
-/// The visible control and whether RLVa permits standing.
-pub fn control(sitting: bool, flying: bool, mouselook: bool, rlva_locked: bool) -> Option<(Action, bool)> {
-    if mouselook {
+/// What a frame knows of the avatar and the interface.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct State {
+    /// Seated on an object or on the ground (`Agent::is_sitting`).
+    pub sitting: bool,
+    pub flying: bool,
+    pub mouselook: bool,
+    /// FSShowInterfaceInMouselook.
+    pub show_in_mouselook: bool,
+    /// The interface hidden by its shortcut, its menus or immersive mode.
+    pub interface_hidden: bool,
+    /// Preferences › Layout › "Show the Stand / Stop flying button".
+    pub setting: bool,
+    /// RLVa refuses standing up (@unsit, RlvActions::canStand).
+    pub stand_locked: bool,
+}
+
+/// The button this frame, and whether it can be pressed; none when it is
+/// hidden.
+pub fn control(s: &State) -> Option<(Action, bool)> {
+    if !s.setting || s.interface_hidden || (s.mouselook && !s.show_in_mouselook) {
         None
-    } else if sitting {
-        Some((Action::StandUp, !rlva_locked))
-    } else if flying {
+    } else if s.sitting {
+        Some((Action::StandUp, !s.stand_locked))
+    } else if s.flying {
         Some((Action::StopFlying, true))
     } else {
         None
     }
 }
 
-/// Draw just above the bottom bar. The action is sent through the same path as
-/// the Me menu and controls window.
-pub fn show(ctx: &egui::Context, p: &Palette, action: Action, enabled: bool, bottom_top: f32) -> bool {
-    let screen = ctx.content_rect();
-    let label = match action {
-        Action::StandUp => aurora_i18n::tr!("common-stand-up"),
-        Action::StopFlying => aurora_i18n::tr!("ui-bars-stop-flying"),
+/// Draws the button, centred `MARGIN` above `bottom_top` (the top of the
+/// bottom bar), in the windows' layer like the Movelock indicator: a window
+/// or a dialog laid over it covers it, as the Legacy Viewer's floaters cover
+/// its toolbars. Whether it was clicked, and the room it took.
+pub fn show(ctx: &egui::Context, p: &Palette, action: Action, enabled: bool, bottom_top: f32) -> (bool, Rect) {
+    let (icon, label) = match action {
+        Action::StandUp => ("man-filled", aurora_i18n::tr!("common-stand-up")),
+        Action::StopFlying => ("plane-departure-filled", aurora_i18n::tr!("ui-bars-stop-flying")),
     };
-    let icon = match action {
-        Action::StandUp => "man-filled",
-        Action::StopFlying => "plane-departure-filled",
-    };
-    let pos = Pos2::new(screen.center().x - 90.0, bottom_top - 42.0);
+    let at = Pos2::new(ctx.content_rect().center().x, bottom_top - super::bars::islands::MARGIN);
     let mut clicked = false;
-    egui::Area::new(Id::unique("stand_stop_flying"))
-        .order(Order::Foreground)
-        .fixed_pos(pos)
+    let shown = egui::Area::new(Id::unique("stand_stop_flying"))
+        .order(Order::Middle)
+        .pivot(Align2::CENTER_BOTTOM)
+        .fixed_pos(at)
         .constrain(true)
-        .movable(false)
         .show(ctx, |ui| {
-            clicked = crate::ui::widgets::action_button_if(
-                ui,
-                p,
-                icon,
-                label,
-                crate::ui::widgets::ActionKind::Primary,
-                Vec2::new(180.0, 34.0),
-                enabled,
-            )
-            .clicked();
+            widgets::overlay(ui, p, Margin::same(4), |ui| {
+                let mut button = widgets::action_button_if(ui, p, icon, label, ActionKind::Flat, Vec2::new(0.0, 28.0), enabled);
+                // only RLVa greys it (the button's response stays enabled)
+                if !enabled {
+                    button = button.on_hover_text(aurora_i18n::tr!("rlva-blocked"));
+                }
+                clicked = button.clicked() && enabled;
+            });
         });
-    clicked
+    (clicked, shown.response.rect)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn shown() -> State {
+        State {
+            setting: true,
+            ..State::default()
+        }
+    }
+
     #[test]
-    fn stand_stop_flying_visibility_and_rlva_state() {
-        assert_eq!(control(false, false, false, false), None);
-        assert_eq!(control(true, false, false, false), Some((Action::StandUp, true)));
-        assert_eq!(control(true, false, false, true), Some((Action::StandUp, false)));
-        assert_eq!(control(false, true, false, false), Some((Action::StopFlying, true)));
-        assert_eq!(control(false, true, true, false), None);
-        assert_eq!(control(true, false, true, true), None);
+    fn stand_button_follows_seat_flight_and_rlva() {
+        let s = shown();
+        assert_eq!(control(&s), None, "standing on the ground: nothing");
+        let seated = State { sitting: true, ..s };
+        assert_eq!(control(&seated), Some((Action::StandUp, true)));
+        assert_eq!(
+            control(&State {
+                stand_locked: true,
+                ..seated
+            }),
+            Some((Action::StandUp, false)),
+            "@unsit greys Stand"
+        );
+        let flying = State { flying: true, ..s };
+        assert_eq!(control(&flying), Some((Action::StopFlying, true)));
+        // RLVa's lock is the seat's: landing is always allowed
+        assert_eq!(
+            control(&State {
+                stand_locked: true,
+                ..flying
+            }),
+            Some((Action::StopFlying, true))
+        );
+        // seated in a vehicle while the flight flag is still set: Stand
+        assert_eq!(control(&State { flying: true, ..seated }), Some((Action::StandUp, true)));
+    }
+
+    #[test]
+    fn stand_button_hides_in_mouselook_hidden_interface_and_by_its_setting() {
+        let seated = State { sitting: true, ..shown() };
+        let flying = State { flying: true, ..shown() };
+        for s in [seated, flying] {
+            assert_eq!(control(&State { mouselook: true, ..s }), None, "mouselook");
+            assert!(
+                control(&State {
+                    mouselook: true,
+                    show_in_mouselook: true,
+                    ..s
+                })
+                .is_some(),
+                "the interface kept in mouselook keeps it"
+            );
+            assert_eq!(
+                control(&State {
+                    mouselook: true,
+                    show_in_mouselook: true,
+                    interface_hidden: true,
+                    ..s
+                }),
+                None
+            );
+            assert_eq!(
+                control(&State {
+                    interface_hidden: true,
+                    ..s
+                }),
+                None,
+                "interface hidden"
+            );
+            assert_eq!(control(&State { setting: false, ..s }), None, "switched off");
+        }
     }
 }

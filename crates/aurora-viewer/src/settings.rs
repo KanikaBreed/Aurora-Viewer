@@ -437,6 +437,10 @@ pub struct Settings {
     pub browser_home_page: String,
     /// Alpha feedback shortcut; Help and login remain available.
     pub show_bug_report: bool,
+    /// The on-screen Stand / Stop flying button while seated or flying
+    /// (LLPanelStandStopFlying); Aurora's switch, the Legacy Viewer always
+    /// shows it (Preferences › Layout).
+    pub show_stand_button: bool,
     /// ShowHUDAttachments, enabled by default in Firestorm.
     pub show_huds: bool,
     /// sunbeacon / moonbeacon: a line from the avatar towards the sun or
@@ -1735,6 +1739,7 @@ impl Default for Settings {
             language_is_public: true,
             browser_home_page: crate::ui::web_browser::DEFAULT_HOME.into(),
             show_bug_report: true,
+            show_stand_button: true,
             show_huds: true,
             sun_beacon: false,
             moon_beacon: false,

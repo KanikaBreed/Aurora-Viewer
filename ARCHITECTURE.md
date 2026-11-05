@@ -1,9 +1,5 @@
 # Aurora Viewer architecture
 
-`ui/stand_button.rs` selects and displays the on-screen Stand / Stop Flying
-control above the bottom bar when seated or flying, hides it in mouselook, and
-uses the same RLVa standing permission and app actions as the existing menus.
-
 World texture/material drops use `Scene::resource_drop_face_at_ray` for one
 consistent object/face hit, including zero-alpha and transparent texel surfaces,
 with HUD ownership, sidedness, distance and terrain occlusion retained. The
@@ -2537,6 +2533,7 @@ Scripts use a shared editor (`ui/scripts.rs`, actions in `app/scripts.rs`) for i
 | `app/object_actions.rs` | Triggering of the actions, held touch, physical move, parcel playback, opening of media and camera framing |
 | `app/contents_copy.rs` | "Copy to inventory" of an object's contents: the move warning of no-copy items, a new folder named after the object (under Clothing to wear it), MoveTaskInventory of each item, then the folder worn once all its items arrived |
 | `ui/controls.rs`, `app/controls.rs` | The Controls window (LLFloaterCamera, LLFloaterMove): camera and movement tabs whose joysticks and buttons are held keys (`App::update_move_input`), the four views, object view, saved camera positions (`camera::CameraShot`), or Firestorm's two windows (`Settings::classic_controls`); while the photo window's free camera flies, its camera tab drives it (`App::photo_free_camera` / `photo_free_move` in `app/snapshot.rs`: the movement keys and the window's buttons move the camera instead of the avatar) |
+| `ui/stand_button.rs` | The on-screen Stand / Stop flying button (#2479, LLPanelStandStopFlying): `control`, the pure rule of what it shows and whether Stand is allowed (seated before flying, RLVa's canStand, mouselook with or without the interface kept, the hidden interface, the Preferences › Layout switch `show_stand_button`), and `show`, its glass overlay centred above the bottom bar in the windows' layer. Its clicks go through `BarAction::StandUp` / `ToggleFly`, as the Me menu |
 | `ui/pay.rs`, `app/pay.rs` | Paying a resident, a group or (Aurora look) an object (LLFloaterPay): quick and free amounts, message, confirmation above a threshold, Buy L$ for what is missing, the server's answer; Firestorm's window as the classic look of Preferences › Aurora |
 | `ui/money_tracker.rs`, `ui/money_tracker/`, `app/money_tracker.rs` | Money tracker (FSMoneyTracker): the L$ received and paid during the session from MoneyBalanceReply's TransactionInfo, while open or always (Track when closed); its list, totals, selection, CSV copy and undo in `money_tracker.rs`, the Aurora look in `aurora.rs`, the Legacy Viewer's window in `legacy.rs`; what is recorded and when, the actions and the demo in the app bridge |
 | `ui/buy_currency.rs`, `app/buy_currency.rs`, `aurora-net/src/currency.rs`, `aurora-net/src/session/currency.rs` | Buying L$, opened from the balance of the top bar: window and estimate / confirmation / purchase cycle (LLFloaterBuyCurrency, LLCurrencyUIManager), choice of the grid's help page, end notification and simulated service of the demo; XML-RPC calls `getCurrencyQuote` / `buyCurrency` (sent only once, parameters never logged) |

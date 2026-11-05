@@ -10,6 +10,12 @@ pub fn page(cx: &mut Cx, tab: usize) {
         0 => {
             cx.group(tr!("ui-options-bars"), |cx| {
                 cx.toggle(tr!("bug-toolbar"), tr!("bug-toolbar-help"), &field!(show_bug_report));
+                // LLPanelStandStopFlying, always shown by the Legacy Viewer
+                cx.toggle(
+                    tr!("ui-options-stand-button"),
+                    tr!("ui-options-stand-button-help"),
+                    &field!(show_stand_button),
+                );
                 // the place island of the Aurora bars (also in its right-click menu)
                 cx.toggle(
                     tr!("ui-options-place-bar-stretch"),

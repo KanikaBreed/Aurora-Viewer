@@ -15210,20 +15210,29 @@ impl App {
                         &favorites,
                     )
                 };
-                if chrome.bottom
-                    && let Some((action, enabled)) = ui::stand_button::control(
-                        self.world.agent.is_sitting(),
-                        self.world.agent.flying,
-                        self.camera.mouselook(),
-                        sit_locked,
-                    )
-                    && ui::stand_button::show(&ctx, &p, action, enabled, bottom_top)
-                {
-                    a.bar = match action {
-                        ui::stand_button::Action::StandUp => BarAction::StandUp,
-                        ui::stand_button::Action::StopFlying => BarAction::ToggleFly,
-                    };
-                }
+                // the Stand / Stop flying button above the bottom bar (#2479),
+                // through the Me menu's actions; `sit_locked` is RLVa's
+                // canStand while seated
+                let stand_button = ui::stand_button::control(&ui::stand_button::State {
+                    sitting: self.world.agent.is_sitting(),
+                    flying: self.world.agent.flying,
+                    mouselook: self.camera.mouselook(),
+                    show_in_mouselook: self.settings.camera.show_interface_in_mouselook,
+                    interface_hidden: self.interface.hidden,
+                    setting: self.settings.show_stand_button,
+                    stand_locked: sit_locked,
+                })
+                .map(|(action, enabled)| {
+                    let (clicked, rect) = ui::stand_button::show(&ctx, &p, action, enabled, bottom_top);
+                    if clicked {
+                        a.bar = match action {
+                            ui::stand_button::Action::StandUp => BarAction::StandUp,
+                            // shown only while flying: the toggle lands
+                            ui::stand_button::Action::StopFlying => BarAction::ToggleFly,
+                        };
+                    }
+                    rect
+                });
                 // what the bars leave: where the windows are laid out and
                 // snapped this frame (above the dock with the islands)
                 let mut area = ui::layout::bars_room(ui.available_rect_before_wrap(), bottom_top, classic_bars);
@@ -15526,7 +15535,9 @@ impl App {
                             .as_ref()
                             .map_or_else(|| aurora_i18n::tr!("keybinds-esc").to_string(), |b| b.label());
                         let text = aurora_i18n::tr!("app-mouselook-leave", key = key);
-                        let at = egui::pos2(c.x, bottom_top - 16.0);
+                        // above the Stand / Stop flying button the interface
+                        // kept in mouselook shows
+                        let at = egui::pos2(c.x, stand_button.map_or(bottom_top - 16.0, |r| r.top() - 8.0));
                         let font = egui::FontId::proportional(18.0);
                         let shadow = at + egui::vec2(1.0, 1.0);
                         painter.text(shadow, egui::Align2::CENTER_BOTTOM, &text, font.clone(), p.navy.gamma_multiply(0.6));

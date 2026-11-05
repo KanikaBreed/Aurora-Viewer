@@ -163,10 +163,13 @@ fn serve(name: &str, ready: &crossbeam_channel::Sender<bool>, links: &crossbeam_
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
     };
     let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    // Owner-only access plus a medium-integrity mandatory label lets a
-    // browser-launched medium-integrity process connect to an elevated
-    // viewer's high-integrity pipe. Remote clients remain rejected below.
-    let sddl: Vec<u16> = "D:P(A;;GA;;;OW)S:(ML;;NW;;;ME)".encode_utf16().chain(std::iter::once(0)).collect();
+    // Access for this user's account plus a medium-integrity mandatory label
+    // lets a browser-launched (medium-integrity) copy reach an elevated
+    // viewer's pipe. Remote clients remain rejected below.
+    let sddl: Vec<u16> = pipe_sddl(current_user_sid().as_deref())
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let mut descriptor = std::ptr::null_mut();
     // SAFETY: `sddl` is NUL-terminated; `descriptor` receives the allocated
     // security descriptor on success.
@@ -382,6 +385,72 @@ mod bus {
         if let Err(e) = bus.release_name(name.as_str()) {
             log::warn!("startup links: name not released ({e})");
         }
+    }
+}
+
+/// The pipe's security descriptor: full access for this user's account only,
+/// and a medium mandatory label so a medium-integrity copy (started by the
+/// browser) can write to a pipe made by an elevated viewer. The account is
+/// named by its SID: "owner rights" (`OW`) would be the Administrators group
+/// for an elevated viewer, which a non-elevated copy holds only as
+/// deny-only, so it would be refused.
+#[cfg(any(windows, test))]
+fn pipe_sddl(user_sid: Option<&str>) -> String {
+    format!("D:P(A;;GA;;;{})S:(ML;;NW;;;ME)", user_sid.unwrap_or("OW"))
+}
+
+/// This process's user SID as text ("S-1-5-21-…").
+#[cfg(windows)]
+fn current_user_sid() -> Option<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree};
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    let mut token = std::ptr::null_mut();
+    // SAFETY: this process's pseudo handle; `token` receives a handle closed below.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return None;
+    }
+    let mut len = 0u32;
+    // SAFETY: a size query, no buffer written.
+    unsafe { GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut len) };
+    // u64 words keep the TOKEN_USER pointer-aligned
+    let mut buf = vec![0u64; (len as usize).div_ceil(8).max(1)];
+    // SAFETY: `buf` holds at least `len` bytes.
+    let ok = unsafe { GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), len, &mut len) } != 0;
+    // SAFETY: the token opened above, not used after.
+    unsafe { CloseHandle(token) };
+    if !ok || (len as usize) < std::mem::size_of::<TOKEN_USER>() {
+        return None;
+    }
+    // SAFETY: GetTokenInformation(TokenUser) wrote a TOKEN_USER at the start
+    // of the aligned buffer; its SID points inside `buf`, alive below.
+    let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    let mut text = std::ptr::null_mut();
+    // SAFETY: `sid` is valid (above); `text` receives a LocalAlloc string.
+    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 || text.is_null() {
+        return None;
+    }
+    // SAFETY: a NUL-terminated UTF-16 string from ConvertSidToStringSidW,
+    // freed right after it is copied.
+    let sid = unsafe {
+        let n = (0..).take_while(|&i| *text.add(i) != 0).count();
+        let s = String::from_utf16_lossy(std::slice::from_raw_parts(text, n));
+        LocalFree(text.cast());
+        s
+    };
+    Some(sid)
+}
+
+#[cfg(test)]
+mod pipe_tests {
+    #[test]
+    fn the_pipe_grants_this_user_and_a_medium_label() {
+        assert_eq!(
+            super::pipe_sddl(Some("S-1-5-21-1-2-3-1001")),
+            "D:P(A;;GA;;;S-1-5-21-1-2-3-1001)S:(ML;;NW;;;ME)"
+        );
+        assert_eq!(super::pipe_sddl(None), "D:P(A;;GA;;;OW)S:(ML;;NW;;;ME)");
     }
 }
 

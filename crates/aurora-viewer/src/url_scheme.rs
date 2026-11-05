@@ -79,7 +79,7 @@ const SCHEMES: [&str; 3] = ["secondlife", "hop", "x-grid-location-info"];
 
 #[cfg(windows)]
 mod win {
-    use super::{Handler, SCHEMES};
+    use super::{Handler, SCHEMES, same_executable, should_repair_aurora_registration};
     use windows_sys::Win32::Foundation::ERROR_SUCCESS;
     use windows_sys::Win32::System::Registry::{
         HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegDeleteTreeW, RegGetValueW,

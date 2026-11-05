@@ -14439,7 +14439,6 @@ impl App {
             self.interface.set_hidden(&ctx, false);
         }
         self.busy_pause_notice(&ctx, &p);
-        self.show_slurl_handler_prompt(&ctx, &p);
         match self.screen {
             Screen::Login => {
                 if let Some(demo) = &mut self.update_demo {
@@ -14501,6 +14500,7 @@ impl App {
                     progress,
                 );
                 self.grid_link_question(&ctx, &p);
+                self.show_slurl_handler_prompt(&ctx, &p);
                 self.sync_remembered_password();
                 // the cogwheel of the login screen (settings before login);
                 // the screen's cards are areas of the same order, and a click

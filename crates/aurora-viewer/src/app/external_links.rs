@@ -149,8 +149,13 @@ pub(super) fn apply_grid(settings: &mut Settings) {
 }
 
 impl App {
+    /// The startup question about the links' handler (the Legacy Viewer's
+    /// installer asks it once, CreateUrlRegistryEntries in
+    /// installer_template.nsi). On the login screen only, after a place
+    /// link's grid question; Enter answers Yes, Escape or a click outside
+    /// Not now.
     pub(super) fn show_slurl_handler_prompt(&mut self, ctx: &egui::Context, p: &crate::theme::Palette) {
-        if self.exit_prompt.open {
+        if self.exit_prompt.open || self.login_form.busy || self.external.grid_ask.is_some() {
             return;
         }
         let Some(handler) = self.external.slurl_handler_prompt.clone() else {
@@ -162,35 +167,43 @@ impl App {
             NotNow,
             Never,
         }
+        use egui::RichText;
         let mut choice = None;
-        crate::ui::widgets::Modal::new(egui::Id::unique("slurl-handler-prompt"))
+        let modal = crate::ui::widgets::Modal::new(egui::Id::unique("slurl-handler-prompt"))
             .login_surface(p)
             .show(ctx, |ui| {
                 ui.set_max_width(420.0);
-                ui.heading(aurora_i18n::tr!("app-slurl-handler-prompt-title"));
-                ui.add_space(8.0);
-                match &handler {
+                ui.label(
+                    RichText::new(aurora_i18n::tr!("app-slurl-handler-prompt-title"))
+                        .size(15.0)
+                        .strong()
+                        .color(p.ink),
+                );
+                ui.add_space(6.0);
+                let text = match &handler {
                     crate::url_scheme::Handler::Other(program) => {
-                        ui.label(aurora_i18n::tr!("app-slurl-handler-prompt-other", program = program.clone()));
+                        aurora_i18n::tr!("app-slurl-handler-prompt-other", program = program.clone())
                     }
-                    crate::url_scheme::Handler::None => {
-                        ui.label(aurora_i18n::tr!("app-slurl-handler-prompt-none"));
-                    }
-                    crate::url_scheme::Handler::This => {}
-                }
-                ui.add_space(14.0);
+                    _ => aurora_i18n::tr!("app-slurl-handler-prompt-none").to_owned(),
+                };
+                ui.add(egui::Label::new(RichText::new(text).size(12.5).color(p.muted)).wrap());
+                ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    if ui.button(aurora_i18n::tr!("app-slurl-handler-yes")).clicked() {
+                    let yes = aurora_i18n::tr!("app-slurl-handler-yes");
+                    if crate::ui::widgets::primary_button_sized(ui, p, yes, egui::vec2(90.0, 26.0)).clicked() {
                         choice = Some(Choice::Yes);
                     }
-                    if ui.button(aurora_i18n::tr!("app-slurl-handler-not-now")).clicked() {
+                    if crate::ui::widgets::flat_button(ui, p, aurora_i18n::tr!("app-slurl-handler-not-now")).clicked() {
                         choice = Some(Choice::NotNow);
                     }
-                    if ui.button(aurora_i18n::tr!("app-slurl-handler-never")).clicked() {
+                    if crate::ui::widgets::flat_button(ui, p, aurora_i18n::tr!("app-slurl-handler-never")).clicked() {
                         choice = Some(Choice::Never);
                     }
                 });
             });
+        if choice.is_none() && modal.should_close() {
+            choice = Some(Choice::NotNow);
+        }
         match choice {
             Some(Choice::Yes) => {
                 self.settings.slurl_handler_prompt = crate::settings::SlurlHandlerPrompt::Acknowledged;
@@ -424,7 +437,7 @@ mod tests {
             should_ask_slurl_handler(&handler, choice, supported, published, demo, titled)
         };
         assert!(should_ask(
-            Handler::Other("firestorm".into()),
+            Handler::Other("LegacyViewer.exe".into()),
             Prompt::Ask,
             true,
             true,

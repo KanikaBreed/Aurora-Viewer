@@ -9,9 +9,10 @@
 //! message (winit owns the window procedure): the first viewer creates it
 //! and a thread reads the links sent to it; a viewer started with a SLURL
 //! writes its link there and stops before opening a window. The pipe's
-//! default security lets only its creator's account write to it, and remote
-//! clients are refused. Demo mode and `--title` test windows use pipes of
-//! their own, so a test never takes the links meant for the human's viewer.
+//! owner-only security with a medium-integrity label lets a browser-launched
+//! process reach an elevated viewer, and remote clients are refused. Demo
+//! mode and `--title` test windows use pipes of their own, so a test never
+//! takes the links meant for the human's viewer.
 //!
 //! On Linux the hand-over goes over the session bus, as the Legacy Viewer's
 //! (LLAppViewerLinux::sendURLToOtherInstance and initSLURLHandler, method
@@ -55,6 +56,7 @@ fn pipe_name() -> String {
 #[cfg(windows)]
 pub fn hand_off(url: &str) -> bool {
     use std::io::Write;
+    use windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND;
     use windows_sys::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
     const ERROR_PIPE_BUSY: i32 = 231;
     let name = pipe_name();
@@ -69,15 +71,39 @@ pub fn hand_off(url: &str) -> bool {
                 unsafe {
                     AllowSetForegroundWindow(ASFW_ANY);
                 }
-                return pipe.write_all(url.as_bytes()).is_ok();
+                if let Err(e) = pipe.write_all(url.as_bytes()) {
+                    record_handoff_failure(&name, e.raw_os_error().unwrap_or(0));
+                    return false;
+                }
+                return true;
             }
             Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            Err(_) => return false,
+            Err(e) if e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => return false,
+            Err(e) => {
+                record_handoff_failure(&name, e.raw_os_error().unwrap_or(0));
+                return false;
+            }
         }
     }
+    record_handoff_failure(&name, ERROR_PIPE_BUSY);
     false
+}
+
+#[cfg(windows)]
+fn record_handoff_failure(pipe: &str, error: i32) {
+    use std::io::Write;
+    let command = crate::url_scheme::registered_command().unwrap_or_else(|| "<not registered>".into());
+    let line = format!("startup SLurl hand-off failed: Windows error {error}; pipe {pipe}; registered command: {command}");
+    eprintln!("{line}");
+    let path = crate::logging::log_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{line}");
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -129,14 +155,39 @@ pub fn listen() -> Option<Receiver<String>> {
 /// read wait, ERROR_PIPE_BUSY).
 #[cfg(windows)]
 fn serve(name: &str, ready: &crossbeam_channel::Sender<bool>, links: &crossbeam_channel::Sender<String>) {
-    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_PIPE_CONNECTED, GetLastError, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_PIPE_CONNECTED, GetLastError, INVALID_HANDLE_VALUE, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
     use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_INBOUND, ReadFile};
     use windows_sys::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
     };
     let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    // SAFETY: `wide` is a NUL-terminated UTF-16 string alive for the call;
-    // a null security descriptor takes the default one (creator only).
+    // Owner-only access plus a medium-integrity mandatory label lets a
+    // browser-launched medium-integrity process connect to an elevated
+    // viewer's high-integrity pipe. Remote clients remain rejected below.
+    let sddl: Vec<u16> = "D:P(A;;GA;;;OW)S:(ML;;NW;;;ME)".encode_utf16().chain(std::iter::once(0)).collect();
+    let mut descriptor = std::ptr::null_mut();
+    // SAFETY: `sddl` is NUL-terminated; `descriptor` receives the allocated
+    // security descriptor on success.
+    let converted = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut descriptor, std::ptr::null_mut())
+    };
+    if converted == 0 {
+        log::error!(
+            "startup links: cannot create medium-integrity pipe ACL (Windows error {})",
+            unsafe { GetLastError() }
+        );
+        let _ = ready.send(false);
+        return;
+    }
+    let mut security = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor,
+        bInheritHandle: 0,
+    };
+    // SAFETY: `wide` and `security` remain alive for the call; the descriptor
+    // is released after CreateNamedPipeW has copied it.
     let pipe = unsafe {
         CreateNamedPipeW(
             wide.as_ptr(),
@@ -146,9 +197,13 @@ fn serve(name: &str, ready: &crossbeam_channel::Sender<bool>, links: &crossbeam_
             0,
             MAX_URL as u32,
             0,
-            std::ptr::null(),
+            &mut security,
         )
     };
+    // SAFETY: conversion allocated this descriptor and it is no longer used.
+    unsafe {
+        LocalFree(descriptor.cast());
+    }
     if pipe == INVALID_HANDLE_VALUE {
         // another viewer of this session already receives the links
         log::info!("startup links: received by another viewer");

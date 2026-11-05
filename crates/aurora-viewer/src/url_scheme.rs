@@ -30,6 +30,48 @@ pub fn supported() -> bool {
     cfg!(any(windows, target_os = "linux"))
 }
 
+#[cfg(windows)]
+pub fn registered_command() -> Option<String> {
+    win::registered_command()
+}
+
+fn should_repair_aurora_registration(exe: &std::path::Path, current: &std::path::Path) -> bool {
+    exe.file_name().is_some_and(|n| n.eq_ignore_ascii_case("aurora-viewer.exe")) && !same_executable(exe, current)
+}
+
+fn same_executable(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a.as_os_str().eq_ignore_ascii_case(b.as_os_str()),
+    }
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::should_repair_aurora_registration;
+    use std::path::Path;
+
+    #[test]
+    fn repairs_a_registration_pointing_at_another_aurora_install() {
+        assert!(should_repair_aurora_registration(
+            Path::new("/old/aurora-viewer.exe"),
+            Path::new("/new/aurora-viewer.exe")
+        ));
+    }
+
+    #[test]
+    fn keeps_the_current_aurora_registration_and_other_viewers() {
+        assert!(!should_repair_aurora_registration(
+            Path::new("/Aurora/aurora-viewer.exe"),
+            Path::new("/Aurora/aurora-viewer.exe")
+        ));
+        assert!(!should_repair_aurora_registration(
+            Path::new("/Firestorm/firestorm.exe"),
+            Path::new("/Aurora/aurora-viewer.exe")
+        ));
+    }
+}
+
 #[cfg(any(windows, target_os = "linux"))]
 const SCHEMES: [&str; 3] = ["secondlife", "hop", "x-grid-location-info"];
 
@@ -122,20 +164,13 @@ mod win {
         (!exe.is_empty()).then(|| std::path::PathBuf::from(exe))
     }
 
-    fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
-        match (a.canonicalize(), b.canonicalize()) {
-            (Ok(a), Ok(b)) => a == b,
-            _ => a.as_os_str().eq_ignore_ascii_case(b.as_os_str()),
-        }
-    }
-
     fn handler_for(scheme: &str) -> Handler {
         // the merged view: the user's class, else the machine's
         let Some(exe) = read(HKEY_CLASSES_ROOT, &format!(r"{scheme}\shell\open\command"), None).and_then(|c| command_exe(&c)) else {
             return Handler::None;
         };
         match std::env::current_exe() {
-            Ok(this) if same_file(&exe, &this) => Handler::This,
+            Ok(this) if same_executable(&exe, &this) => Handler::This,
             _ => Handler::Other(
                 exe.file_name()
                     .map_or_else(|| exe.display().to_string(), |name| name.to_string_lossy().into_owned()),
@@ -156,6 +191,12 @@ mod win {
             register_scheme(scheme)?;
         }
         Ok(())
+    }
+
+    pub fn registered_command() -> Option<String> {
+        SCHEMES
+            .iter()
+            .find_map(|scheme| read(HKEY_CLASSES_ROOT, &format!(r"{scheme}\shell\open\command"), None))
     }
 
     fn register_scheme(scheme: &str) -> Result<(), String> {
@@ -185,7 +226,7 @@ mod win {
         let ours = read(HKEY_CURRENT_USER, &format!(r"{class}\shell\open\command"), None)
             .and_then(|c| command_exe(&c))
             .zip(std::env::current_exe().ok())
-            .is_some_and(|(exe, this)| same_file(&exe, &this));
+            .is_some_and(|(exe, this)| same_executable(&exe, &this));
         if !ours {
             return Ok(());
         }
@@ -203,13 +244,15 @@ mod win {
     /// A user class left pointing at an Aurora executable that no longer
     /// exists (the folder moved) is pointed at this one.
     pub fn repair() {
+        let Ok(this) = std::env::current_exe() else {
+            return;
+        };
         for scheme in SCHEMES {
             let class = format!(r"Software\Classes\{scheme}");
             let Some(exe) = read(HKEY_CURRENT_USER, &format!(r"{class}\shell\open\command"), None).and_then(|c| command_exe(&c)) else {
                 continue;
             };
-            let aurora = exe.file_name().is_some_and(|n| n.eq_ignore_ascii_case("aurora-viewer.exe"));
-            if aurora && !exe.exists() {
+            if should_repair_aurora_registration(&exe, &this) {
                 log::info!("{scheme} links: the registered viewer moved");
                 if let Err(e) = register_scheme(scheme) {
                     log::warn!("{scheme} links: {e}");

@@ -177,8 +177,10 @@ fn spot_priority(position: Vec3, direction: Vec3, radius: f32, view: &LightView)
     (radius * 3f32.sqrt() / dist.max(1e-4)).atan()
 }
 
-/// Worn by an avatar: a parent up its link is one (the attachment's root,
-/// or the prim itself; LLViewerObject::isAttachment).
+/// The avatar that wears the light, if any: a parent up its link is one
+/// (the attachment's root, or the prim itself; LLViewerObject::isAttachment).
+/// A seat's linkset and animesh are not worn: their avatars are children of
+/// the prims, not parents.
 fn worn(world: &World, o: &crate::world::objects::Object) -> Option<Uuid> {
     let mut current = o;
     for _ in 0..4 {
@@ -191,6 +193,11 @@ fn worn(world: &World, o: &crate::world::objects::Object) -> Option<Uuid> {
     None
 }
 
+/// Whether a light enters the frame's list. The photo window's switch
+/// (`Scene::attached_lights`) drops every worn light, as the Legacy Viewer's
+/// RenderAttachedLights does; the Graphics preference (#2474) drops only
+/// those of other avatars and keeps ours, beyond the Legacy Viewer's
+/// all-or-nothing setting.
 fn light_visible(wearer: Option<Uuid>, agent: Uuid, photo_attached: bool, others_attached: bool) -> bool {
     wearer.is_none() || (photo_attached && (others_attached || wearer == Some(agent)))
 }
@@ -362,12 +369,48 @@ mod tests {
     fn other_avatar_lights_can_be_hidden_without_hiding_our_own() {
         let agent = Uuid::from_u128(1);
         let other = Uuid::from_u128(2);
+        // preference off: ours kept, others dropped, unworn kept
         assert!(light_visible(Some(agent), agent, true, false));
         assert!(!light_visible(Some(other), agent, true, false));
-        assert!(light_visible(Some(other), agent, true, true));
         assert!(light_visible(None, agent, true, false));
-        assert!(!light_visible(Some(agent), agent, false, true));
-        assert!(!light_visible(Some(other), agent, false, true));
+        assert!(light_visible(Some(other), agent, true, true));
+        // photo switch off: every worn light dropped, whatever the preference
+        for others in [true, false] {
+            assert!(!light_visible(Some(agent), agent, false, others));
+            assert!(!light_visible(Some(other), agent, false, others));
+            assert!(light_visible(None, agent, false, others));
+        }
+    }
+
+    /// #2474: the wearer is found from a child prim of an attachment, ours
+    /// by the agent id; a seat's linkset is not worn by its sitter.
+    #[test]
+    fn the_wearer_of_a_light_is_the_avatar_above_its_linkset() {
+        let mut w = World::new(std::sync::Arc::new(crate::scene::avatar::AvatarLibrary::load()));
+        for ev in crate::demo::events().into_iter().chain(crate::demo::action_events()) {
+            w.apply(ev);
+        }
+        let own = w.objects.index_of_uuid(&w.agent_id).expect("our avatar");
+        let own_local = w.objects.get(own).unwrap().key.local_id;
+        let (other, other_id) = w
+            .objects
+            .avatars()
+            .find(|(_, o)| o.full_id != w.agent_id)
+            .map(|(_, o)| (o.key.local_id, o.full_id))
+            .expect("another demo resident");
+        let root = w.objects.index_of_uuid(&crate::demo::action_id(971)).unwrap();
+        let child = w.objects.index_of_uuid(&crate::demo::action_id(974)).unwrap();
+        let wearer = |w: &World, idx| worn(w, w.objects.get(idx).unwrap());
+        assert_eq!((wearer(&w, root), wearer(&w, child)), (None, None));
+        // we sit on it: the avatar is the child, the prims stay unworn
+        let root_local = w.objects.get(root).unwrap().key.local_id;
+        w.objects.get_mut(own).unwrap().parent_id = root_local;
+        assert_eq!((wearer(&w, root), wearer(&w, child)), (None, None));
+        w.objects.get_mut(own).unwrap().parent_id = 0;
+        w.objects.get_mut(root).unwrap().parent_id = other;
+        assert_eq!((wearer(&w, root), wearer(&w, child)), (Some(other_id), Some(other_id)));
+        w.objects.get_mut(root).unwrap().parent_id = own_local;
+        assert_eq!(wearer(&w, child), Some(w.agent_id));
     }
 
     #[test]

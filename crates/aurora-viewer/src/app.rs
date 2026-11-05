@@ -1279,6 +1279,7 @@ impl App {
         scene.draw_distance = settings.draw_distance;
         scene.lod_factor = settings.lod_factor;
         let update_demo = ui::update::UpdateDemo::from_env(&settings);
+        let external = external_links::ExternalLinks::start(&settings);
         Ok(Box::new(App {
             area_search_ui: ui::area_search::AreaSearchUi::from_saved(&settings.area_search),
             settings,
@@ -1554,7 +1555,7 @@ impl App {
             reconnect_place: None,
             login_favorites: Default::default(),
             friends_only_account: uuid::Uuid::nil(),
-            external: external_links::ExternalLinks::start(),
+            external,
             demo_link_health: link_health::LinkHealthDemo::from_env(),
             demo_lookups: Vec::new(),
             remote_object: None,
@@ -14438,6 +14439,7 @@ impl App {
             self.interface.set_hidden(&ctx, false);
         }
         self.busy_pause_notice(&ctx, &p);
+        self.show_slurl_handler_prompt(&ctx, &p);
         match self.screen {
             Screen::Login => {
                 if let Some(demo) = &mut self.update_demo {

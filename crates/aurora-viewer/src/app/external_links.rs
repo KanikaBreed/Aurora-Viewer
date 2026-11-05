@@ -31,6 +31,24 @@ pub(super) struct ExternalLinks {
     /// A place link naming another grid than the login screen's, until the
     /// resident answers the question (`grid_link_question`).
     grid_ask: Option<GridAsk>,
+    /// The one-time startup question about registering Aurora for SLURLs.
+    slurl_handler_prompt: Option<crate::url_scheme::Handler>,
+}
+
+fn should_ask_slurl_handler(
+    handler: &crate::url_scheme::Handler,
+    choice: crate::settings::SlurlHandlerPrompt,
+    supported: bool,
+    published: bool,
+    demo: bool,
+    titled: bool,
+) -> bool {
+    supported
+        && published
+        && !demo
+        && !titled
+        && choice == crate::settings::SlurlHandlerPrompt::Ask
+        && matches!(handler, crate::url_scheme::Handler::Other(_) | crate::url_scheme::Handler::None)
 }
 
 /// The question a place link from outside raises before it may change the
@@ -83,12 +101,23 @@ pub(super) fn grid_switch(settings: &Settings, authority: Option<&str>) -> GridS
 }
 
 impl ExternalLinks {
-    pub(super) fn start() -> Self {
+    pub(super) fn start(settings: &crate::settings::Settings) -> Self {
         crate::url_scheme::repair_at_start();
+        let handler = crate::url_scheme::handler();
+        let prompt = should_ask_slurl_handler(
+            &handler,
+            settings.slurl_handler_prompt,
+            crate::url_scheme::supported(),
+            env!("AURORA_BUILD_PROFILE") == "release",
+            std::env::var_os("AURORA_DEMO").is_some(),
+            crate::cli::get().title.is_some(),
+        )
+        .then_some(handler);
         ExternalLinks {
             rx: crate::slurl_handoff::listen(),
             startup: crate::cli::get().url.clone(),
             login: crate::cli::take_login(),
+            slurl_handler_prompt: prompt,
             ..Default::default()
         }
     }
@@ -120,6 +149,68 @@ pub(super) fn apply_grid(settings: &mut Settings) {
 }
 
 impl App {
+    pub(super) fn show_slurl_handler_prompt(&mut self, ctx: &egui::Context, p: &crate::theme::Palette) {
+        if self.exit_prompt.open {
+            return;
+        }
+        let Some(handler) = self.external.slurl_handler_prompt.clone() else {
+            return;
+        };
+        #[derive(Clone, Copy)]
+        enum Choice {
+            Yes,
+            NotNow,
+            Never,
+        }
+        let mut choice = None;
+        crate::ui::widgets::Modal::new(egui::Id::unique("slurl-handler-prompt"))
+            .login_surface(p)
+            .show(ctx, |ui| {
+                ui.set_max_width(420.0);
+                ui.heading(aurora_i18n::tr!("app-slurl-handler-prompt-title"));
+                ui.add_space(8.0);
+                match &handler {
+                    crate::url_scheme::Handler::Other(program) => {
+                        ui.label(aurora_i18n::tr!("app-slurl-handler-prompt-other", program = program.clone()));
+                    }
+                    crate::url_scheme::Handler::None => {
+                        ui.label(aurora_i18n::tr!("app-slurl-handler-prompt-none"));
+                    }
+                    crate::url_scheme::Handler::This => {}
+                }
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    if ui.button(aurora_i18n::tr!("app-slurl-handler-yes")).clicked() {
+                        choice = Some(Choice::Yes);
+                    }
+                    if ui.button(aurora_i18n::tr!("app-slurl-handler-not-now")).clicked() {
+                        choice = Some(Choice::NotNow);
+                    }
+                    if ui.button(aurora_i18n::tr!("app-slurl-handler-never")).clicked() {
+                        choice = Some(Choice::Never);
+                    }
+                });
+            });
+        match choice {
+            Some(Choice::Yes) => {
+                self.settings.slurl_handler_prompt = crate::settings::SlurlHandlerPrompt::Acknowledged;
+                if let Err(e) = crate::url_scheme::register() {
+                    log::warn!("SLURL handler: registering Aurora failed ({e})");
+                }
+                crate::url_scheme::refresh();
+                self.settings.save();
+                self.external.slurl_handler_prompt = None;
+            }
+            Some(Choice::NotNow) => self.external.slurl_handler_prompt = None,
+            Some(Choice::Never) => {
+                self.settings.slurl_handler_prompt = crate::settings::SlurlHandlerPrompt::Never;
+                self.settings.save();
+                self.external.slurl_handler_prompt = None;
+            }
+            None => {}
+        }
+    }
+
     /// Each loop: the startup link, the links handed over since, and the
     /// requests that waited for the world.
     pub(super) fn external_links(&mut self) {
@@ -324,5 +415,29 @@ mod tests {
         // the same grid typed by hand, not saved
         let settings = settings_on(crate::settings::GridChoice::Custom, "https://other.example/", &[]);
         assert_eq!(grid_switch(&settings, Some("other.example")), GridSwitch::Same);
+    }
+
+    #[test]
+    fn slurl_handler_question_is_only_for_unhandled_supported_published_starts() {
+        use crate::{settings::SlurlHandlerPrompt as Prompt, url_scheme::Handler};
+        let should_ask = |handler, choice, supported, published, demo, titled| {
+            should_ask_slurl_handler(&handler, choice, supported, published, demo, titled)
+        };
+        assert!(should_ask(
+            Handler::Other("firestorm".into()),
+            Prompt::Ask,
+            true,
+            true,
+            false,
+            false
+        ));
+        assert!(should_ask(Handler::None, Prompt::Ask, true, true, false, false));
+        assert!(!should_ask(Handler::This, Prompt::Ask, true, true, false, false));
+        assert!(!should_ask(Handler::None, Prompt::Acknowledged, true, true, false, false));
+        assert!(!should_ask(Handler::None, Prompt::Never, true, true, false, false));
+        assert!(!should_ask(Handler::None, Prompt::Ask, false, true, false, false));
+        assert!(!should_ask(Handler::None, Prompt::Ask, true, false, false, false));
+        assert!(!should_ask(Handler::None, Prompt::Ask, true, true, true, false));
+        assert!(!should_ask(Handler::None, Prompt::Ask, true, true, false, true));
     }
 }

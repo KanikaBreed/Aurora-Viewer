@@ -71,7 +71,7 @@ pub fn page(cx: &mut Cx) {
                 tr!("ui-options-slurl-links-open"),
                 tr!("ui-options-slurl-links-open-help"),
                 &Nothing,
-                |ui, _| {
+                |ui, s| {
                     let mut on = handler == Handler::This;
                     if super::super::toggle(ui, &p, &mut on) {
                         let done = if on {
@@ -83,6 +83,8 @@ pub fn page(cx: &mut Cx) {
                             log::warn!("secondlife links: {e}");
                         }
                         crate::url_scheme::refresh();
+                        s.slurl_handler_prompt = crate::settings::SlurlHandlerPrompt::Acknowledged;
+                        return true;
                     }
                     false
                 },

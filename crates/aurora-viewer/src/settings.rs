@@ -66,6 +66,17 @@ pub enum FavoritesAccess {
     Dock,
 }
 
+/// Whether startup may ask to make Aurora the SLURL and Hypergrid handler.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SlurlHandlerPrompt {
+    #[default]
+    Ask,
+    /// The user answered the question or changed the handler in Preferences.
+    Acknowledged,
+    /// The user chose not to see the question again.
+    Never,
+}
+
 /// What the system island shows (its right click, "Show in the island"),
 /// as Firestorm's status bar menu shows or hides its parts
 /// (menu_hide_navbar.xml); all shown by default.
@@ -421,6 +432,8 @@ const FORMER_LOOK_AT_UNLIMITED: f32 = 64.0;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// Startup prompt for making Aurora the SLURL handler.
+    pub slurl_handler_prompt: SlurlHandlerPrompt,
     pub update_mode: crate::updater::Mode,
     /// Stable releases only, or also the betas built every night
     /// (Preferences › Language and updates).
@@ -1724,6 +1737,7 @@ impl AudioSettings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            slurl_handler_prompt: SlurlHandlerPrompt::Ask,
             update_mode: crate::updater::Mode::Ask,
             update_channel: aurora_updater::feed::Channel::Stable,
             ignored_update: String::new(),
@@ -4304,5 +4318,23 @@ mod tests {
         // a key no build writes any more is not carried forward
         assert!(written.get("former_key").is_none());
         assert_eq!(written["settings_version"], SETTINGS_VERSION);
+    }
+
+    #[test]
+    fn slurl_handler_prompt_defaults_to_ask_and_persists_its_choices() {
+        let mut value = serde_json::to_value(Settings::default()).expect("settings JSON");
+        assert_eq!(value["slurl_handler_prompt"], "Ask");
+        value["slurl_handler_prompt"] = serde_json::json!("Never");
+        let saved: Settings = serde_json::from_value(value.clone()).expect("saved choice");
+        assert_eq!(saved.slurl_handler_prompt, SlurlHandlerPrompt::Never);
+
+        value["slurl_handler_prompt"] = serde_json::json!("Acknowledged");
+        let saved: Settings = serde_json::from_value(value).expect("acknowledged choice");
+        assert_eq!(saved.slurl_handler_prompt, SlurlHandlerPrompt::Acknowledged);
+
+        let mut old = serde_json::to_value(Settings::default()).expect("old settings JSON");
+        old.as_object_mut().expect("settings object").remove("slurl_handler_prompt");
+        let old: Settings = serde_json::from_value(old).expect("old settings without the new field");
+        assert_eq!(old.slurl_handler_prompt, SlurlHandlerPrompt::Ask);
     }
 }

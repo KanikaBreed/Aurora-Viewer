@@ -5,10 +5,10 @@
 //! (`github.rs`), with the text they can read first (`summary.rs`), and
 //! asked for by default; the full diagnostics stay in the session folder.
 
-pub(crate) mod flight_recorder;
 mod environment;
 #[cfg(windows)]
 mod environment_windows;
+pub(crate) mod flight_recorder;
 pub mod github;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -73,6 +73,27 @@ struct Session {
 /// an immediate restart cannot rotate it into another crash's report.
 pub fn session_log() -> Option<std::fs::File> {
     std::fs::File::create(SESSION.get()?.dir.join("session.log")).ok()
+}
+
+/// The current session's local artifact directory. Callers may add only
+/// explicitly selected, bounded artifacts to an export.
+pub fn current_session_dir() -> Option<PathBuf> {
+    SESSION.get().map(|session| session.dir.clone())
+}
+
+/// The newest crash summary that has already passed the public report's
+/// closed-vocabulary filtering. Raw traces and logs are never returned here.
+pub fn latest_public_report() -> Option<String> {
+    let mut sessions = std::fs::read_dir(root())
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    sessions.sort_by_key(|dir| std::fs::metadata(dir).and_then(|m| m.modified()).ok());
+    sessions
+        .into_iter()
+        .rev()
+        .find_map(|dir| read_limited(&dir.join("public-report.md"), 128 * 1024).ok())
 }
 
 fn root() -> PathBuf {

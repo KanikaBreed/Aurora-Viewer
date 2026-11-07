@@ -73,6 +73,7 @@ mod mac_quit;
 mod machine_id;
 mod media;
 mod movement;
+mod natural_order;
 mod net_adapters;
 mod net_profile;
 mod open_path;
@@ -99,6 +100,7 @@ mod theme;
 mod tolerant;
 mod ui;
 mod ui_sound;
+mod uninstall;
 mod updater;
 mod url_scheme;
 mod voice;
@@ -136,6 +138,11 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     cli::get();
+    // without a window: before the crash watcher, the logs and the link
+    // hand-off
+    if cli::get().uninstall {
+        std::process::exit(uninstall::command_line());
+    }
     anyhow::ensure!(
         std::env::var_os("AURORA_UPDATE_TEST_ROOT").is_none() || aurora_updater::test_environment().is_some(),
         "invalid isolated update test installation"
@@ -213,6 +220,8 @@ fn main() -> anyhow::Result<()> {
     if let Err(error) = &result {
         crash::failure(&format!("Viewer startup / event loop error: {error:#}"));
     }
+    // the log writer thread ends with the process: its queue first
+    logging::drain(logging::DRAIN_WAIT);
     crash::finished(result.is_ok());
     result
 }

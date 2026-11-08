@@ -112,7 +112,7 @@ impl App {
 
     /// The notice over the paused world.
     pub(super) fn busy_pause_notice(&self, ctx: &egui::Context, p: &crate::theme::Palette) {
-        if !self.busy_pause.paused() {
+        if !self.busy_pause.paused() || self.interface.hidden {
             return;
         }
         // The paused world, blurred and darkened (the modals' blur, ui_blur.rs:

@@ -456,3 +456,39 @@ fn a_scripted_window_kept_in_comes_out_afterwards() {
         assert_eq!(c.peek.iter().map(|p| p.id).collect::<Vec<_>>(), windows);
     }
 }
+
+#[test]
+fn the_hidden_interface_queues_cards_and_keeps_their_deadlines_running() {
+    let mut list = Notifications::default();
+    let mut c = CenterUi::default();
+    let ordinary = info(&mut list, "Parcel notice");
+    let windows = scripted_windows(&mut list);
+    update(
+        &list,
+        &mut c,
+        Moment {
+            interface_hidden: true,
+            ..at(10.0)
+        },
+        30.0,
+    );
+    let ids: Vec<u64> = c.peek.iter().map(|p| p.id).collect();
+    assert_eq!(ids, [ordinary, windows[0], windows[1], windows[2], windows[3]]);
+    assert!(c.peek.iter().filter(|p| p.pinned).all(|p| p.left == SHOW_ANSWER));
+    assert_eq!(bell_count(&list, &c), 0, "queued cards are not counted until they fold");
+
+    update(
+        &list,
+        &mut c,
+        Moment {
+            interface_hidden: true,
+            ..at(12.0)
+        },
+        30.0,
+    );
+    assert_eq!(c.peek.iter().find(|p| p.id == ordinary).unwrap().left, SHOW_INFO - 2.0);
+    assert!(c.peek.iter().filter(|p| p.pinned).all(|p| p.folding.is_none()));
+
+    update(&list, &mut c, at(12.0), 30.0);
+    assert_eq!(c.peek.iter().map(|p| p.id).collect::<Vec<_>>(), ids);
+}

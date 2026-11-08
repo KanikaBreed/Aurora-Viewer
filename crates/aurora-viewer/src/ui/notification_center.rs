@@ -5,7 +5,7 @@
 //! bounces. Clicking the bell opens the full list at the same place, with a
 //! "To do" tab and the persistent "History" (world/notification_history.rs).
 //! In do not disturb the bell is paused: nothing unrolls nor rings but the
-//! script menus (`dnd_shows`), everything still arrives in "To do". The Firestorm behaviour (toasts stacked apart from
+//! script menus (`dnd_shows`), everything still arrives in "To do". The Legacy Viewer behaviour (toasts stacked apart from
 //! the bell) stays in `ui::notifications` as the Legacy style.
 
 use super::icons::Icons;
@@ -19,7 +19,7 @@ use crate::world::notifications::{Data, Notification, Notifications, Response};
 use egui::{Rect, RichText, Vec2};
 
 /// Width of the panel under the bell (the mockup's 360 px), with
-/// Firestorm's bars; the islands give it theirs (`NotifUi::column`).
+/// Legacy Viewer's bars; the islands give it theirs (`NotifUi::column`).
 pub const WIDTH: f32 = 360.0;
 /// What the panel's overlay adds around its content: 6 px of margin and the
 /// 1 px border on each side.
@@ -98,6 +98,8 @@ pub struct Moment {
     pub dnd: bool,
     /// Mouselook or the photo's full frame: nothing over the view.
     pub hidden: bool,
+    /// The interface shortcut hides cards while their existing timers run.
+    pub interface_hidden: bool,
     /// The full list is open.
     pub open: bool,
     /// The friends' toasts stand at the top right, where the cards unroll:
@@ -123,10 +125,10 @@ pub fn dnd_shows(n: &Notification) -> bool {
     matches!(n.data, Data::Dialog { .. } | Data::TextBox { .. })
 }
 
-/// A scripted object's window out of the way of the list, the clear view or
-/// do not disturb, which can be shown now.
-fn may_show(n: &Notification, m: &Moment) -> bool {
-    !m.open && !m.hidden && (!m.dnd || dnd_shows(n))
+/// New cards queue behind a hidden interface, with their usual timers. Other
+/// reasons to keep the view clear still defer ordinary cards as before.
+fn may_queue(n: &Notification, m: &Moment) -> bool {
+    (!m.hidden || m.interface_hidden) && (!m.open || m.interface_hidden) && (!m.dnd || dnd_shows(n))
 }
 
 /// Rolls out as a card: what is listed, and a message kept out of the bell
@@ -156,7 +158,7 @@ pub fn update(list: &Notifications, c: &mut CenterUi, m: Moment, message_seconds
         .iter()
         .filter(|n| n.id > c.last_seen && n.transient && matches!(n.data, Data::Presence { .. }))
     {
-        if !m.hidden {
+        if !m.hidden || m.interface_hidden {
             c.presence.push(presence::Toast {
                 id: n.id,
                 arrived: m.now,
@@ -165,7 +167,7 @@ pub fn update(list: &Notifications, c: &mut CenterUi, m: Moment, message_seconds
         }
     }
     for n in list.list.iter().filter(|n| n.id > c.last_seen && card(n)) {
-        if !n.stays_until_answered() && !n.read && !n.quiet && may_show(n, &m) {
+        if !n.stays_until_answered() && !n.read && !n.quiet && may_queue(n, &m) {
             let total = show_seconds(n, message_seconds);
             c.peek.push(Peek {
                 id: n.id,
@@ -179,7 +181,7 @@ pub fn update(list: &Notifications, c: &mut CenterUi, m: Moment, message_seconds
     if let Some(last) = list.list.iter().map(|n| n.id).max() {
         c.last_seen = c.last_seen.max(last);
     }
-    if m.open || m.hidden {
+    if (m.open || m.hidden) && !m.interface_hidden {
         // the list shows everything / the view stays clear: no card stays out
         c.peek.clear();
     } else if m.dnd {
@@ -192,7 +194,7 @@ pub fn update(list: &Notifications, c: &mut CenterUi, m: Moment, message_seconds
     // ends (seen in the list or not, it is still waiting)
     let mut back = false;
     for n in list.list.iter().filter(|n| n.stays_until_answered() && !n.quiet && card(n)) {
-        if may_show(n, &m) && !c.peek.iter().any(|p| p.id == n.id) {
+        if may_queue(n, &m) && !c.peek.iter().any(|p| p.id == n.id) {
             c.peek.push(Peek {
                 id: n.id,
                 total: SHOW_ANSWER,
@@ -358,7 +360,7 @@ pub fn show(
     let mut answers = Vec::new();
     let mut asks = Vec::new();
     let now = ctx.input(|i| i.time);
-    // published by the islands this frame (Firestorm's bars have none)
+    // published by the islands this frame (Legacy Viewer's bars have none)
     let column = nui.column.take();
     let hovered = nui
         .center
@@ -373,6 +375,7 @@ pub fn show(
             hovered,
             dnd,
             hidden: env.hidden,
+            interface_hidden: env.interface_hidden,
             open: nui.open,
             under_bell: env.presence_at == PresencePosition::TopRight,
         },
@@ -383,13 +386,16 @@ pub fn show(
     let (presence, peek) = (&nui.center.presence, &nui.center.peek);
     list.list
         .retain(|n| !n.transient || presence.iter().any(|t| t.id == n.id) || peek.iter().any(|p| p.id == n.id));
+    if env.interface_hidden {
+        return (answers, asks);
+    }
     let Some(bell) = nui.bell else {
         return (answers, asks);
     };
     presence_toasts(ctx, p, list, nui, env, column, now, &mut answers);
     let screen = ctx.content_rect();
     // with the islands, exactly under the system and bell islands, the
-    // overlay's margins and border within that width; with Firestorm's bars
+    // overlay's margins and border within that width; with Legacy Viewer's bars
     // its own width, ending under the bell
     let (x, inner) = match column {
         Some(c) => (c.left(), c.width() - PANEL_FRAME),
@@ -671,7 +677,7 @@ fn full_list(
     }
 }
 
-/// The "To do" / "History" tabs of a list (Aurora's center and Firestorm's
+/// The "To do" / "History" tabs of a list (Aurora's center and Legacy Viewer's
 /// well); returns whether the history is shown.
 pub(super) fn tabs(ui: &mut egui::Ui, p: &Palette, tab: &mut Tab) -> bool {
     let options = [
@@ -826,7 +832,7 @@ fn presence_toasts(
     answers: &mut Vec<(u64, Response)>,
 ) {
     let shown: Vec<(u64, f64)> = nui.center.presence.iter().filter_map(|t| Some((t.id, t.shown?))).collect();
-    if shown.is_empty() || env.hidden {
+    if shown.is_empty() || env.hidden || env.interface_hidden {
         return;
     }
     let mut room = presence::room(super::layout::work_area(ctx), env.classic_bars);

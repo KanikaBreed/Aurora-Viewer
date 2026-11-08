@@ -9,6 +9,9 @@ impl App {
     /// The Pay window of a resident or a group, and the payment to an object
     /// in the look chosen (`Settings::classic_pay_window`).
     pub(super) fn show_pay(&mut self, ctx: &egui::Context, p: &Palette, a: &mut UiActions) {
+        if self.interface.hidden {
+            return;
+        }
         let classic = self.settings.classic_pay_window;
         let (confirm, threshold) = (self.settings.confirm_payments, self.settings.payment_confirm_threshold);
         let paying_object = self.interactions.dialog.as_ref().is_some_and(|d| d.target.action == Action::Pay);

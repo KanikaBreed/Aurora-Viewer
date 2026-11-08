@@ -97,7 +97,7 @@ impl App {
 
     /// The pill while the agent's region is silent (and the demo's link).
     pub(super) fn show_link_health(&mut self, ctx: &egui::Context, p: &crate::theme::Palette) {
-        if !matches!(self.screen, Screen::World) {
+        if !matches!(self.screen, Screen::World) || self.interface.hidden {
             return;
         }
         let age = match &self.demo_link_health {

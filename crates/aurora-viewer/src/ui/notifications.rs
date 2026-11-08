@@ -1,6 +1,6 @@
 //! Notification center: bell of the navigation bar (unread badge), the
 //! list it opens and the toasts shown when something arrives — the
-//! Firestorm notification well / toasts, flattened to Aurora cards.
+//! Legacy Viewer notification well / toasts, flattened to Aurora cards.
 //! Script grids follow LLToastNotifyPanel::updateButtonsLayout
 //! (indra/newview/lltoastnotifypanel.cpp, originally LGPL 2.1).
 
@@ -48,7 +48,7 @@ pub struct NotifUi {
     /// With the islands, from the system island's left edge to the bell
     /// island's right edge, as drawn this frame: Aurora's center (its list,
     /// its cards, the friends' toasts at the top right) stands exactly under
-    /// it. `None` with Firestorm's bars.
+    /// it. `None` with Legacy Viewer's bars.
     pub column: Option<egui::Rect>,
     /// Aurora's center (`ui::notification_center`).
     pub center: super::notification_center::CenterUi,
@@ -62,13 +62,19 @@ pub struct ToastEnv<'a> {
     pub images: &'a HashMap<Uuid, egui::TextureHandle>,
     pub emoji: &'a mut super::emoji::Emoji,
     pub hidden: bool,
+    /// The interface shortcut hides notification overlays but keeps their
+    /// queued items and existing toast deadlines running. The Legacy Viewer
+    /// hides existing floaters in LLViewerWindow::setUIVisibility, but its
+    /// LLScriptFloaterManager shows dialogs received afterward immediately;
+    /// defer those arrivals here to meet the requested hidden-interface rule.
+    pub interface_hidden: bool,
     /// Seconds a message toast stays (NotificationToastLifeTime).
     pub message_seconds: f64,
     /// The region restart counting down: its card in Aurora's center shows
     /// the live count (`ui::region_restart::bell_card`).
     pub restart: Option<super::region_restart::BellInfo>,
     /// Where Aurora's center shows the friends' online / offline toasts
-    /// (`notification_center::presence`), and whether Firestorm's
+    /// (`notification_center::presence`), and whether Legacy Viewer's
     /// full-width bars are shown (their room has no margin of its own).
     pub presence_at: crate::settings::PresencePosition,
     pub classic_bars: bool,
@@ -451,7 +457,7 @@ pub(super) fn card(
             });
             if !n.body.is_empty() {
                 ui.add_space(2.0);
-                // selectable: Firestorm shows the body in a read-only
+                // selectable: Legacy Viewer shows the body in a read-only
                 // LLTextEditor (lltoastnotifypanel.cpp, "text_editor_box")
                 if script {
                     egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
@@ -789,11 +795,28 @@ fn button_sized(ui: &mut egui::Ui, p: &Palette, label: &str, primary: bool, size
 /// until answered, whatever comes after it, and is only kept in while the
 /// list is open, the view must stay clear or do not disturb holds it.
 fn update_toasts(list: &mut Notifications, nui: &mut NotifUi, now: f64, message_seconds: f64, hidden: bool, dnd: bool) {
+    update_toasts_with_interface(list, nui, now, message_seconds, hidden, dnd, false);
+}
+
+fn update_toasts_with_interface(
+    list: &mut Notifications,
+    nui: &mut NotifUi,
+    now: f64,
+    message_seconds: f64,
+    hidden: bool,
+    dnd: bool,
+    interface_hidden: bool,
+) {
     // new arrivals become toasts (unless the list is open or the view must
     // stay clear, or they were already seen where they arrived: a card in
     // the conversation in sight)
     for n in list.list.iter().filter(|n| n.id > nui.last_seen && !n.stays_until_answered()) {
-        if !nui.open && !hidden && !n.read && !n.quiet && (!dnd || super::notification_center::dnd_shows(n)) {
+        if (!nui.open || interface_hidden)
+            && (!hidden || interface_hidden)
+            && !n.read
+            && !n.quiet
+            && (!dnd || super::notification_center::dnd_shows(n))
+        {
             nui.toasts.push((n.id, now + toast_seconds(n, message_seconds)));
         }
     }
@@ -869,13 +892,17 @@ pub fn show(
     let mut answers = Vec::new();
     let mut asks = Vec::new();
     let now = ctx.input(|i| i.time);
-    // Firestorm's toasts keep their own place: the islands' column is for
+    // Legacy Viewer's toasts keep their own place: the islands' column is for
     // Aurora's center only (not kept for a later frame of it)
     nui.column = None;
-    update_toasts(list, nui, now, env.message_seconds, env.hidden, dnd);
+    if env.interface_hidden {
+        update_toasts_with_interface(list, nui, now, env.message_seconds, env.hidden, dnd, true);
+    } else {
+        update_toasts(list, nui, now, env.message_seconds, env.hidden, dnd);
+    }
 
     let anchor = nui.anchor.unwrap_or(egui::pos2(8.0, 60.0));
-    if nui.open {
+    if nui.open && !env.interface_hidden {
         nui.toasts.clear();
         list.mark_all_read();
         let area = egui::Area::new(egui::Id::unique("notification_list"))
@@ -974,7 +1001,7 @@ pub fn show(
         if clicked_out {
             nui.open = false;
         }
-    } else if !nui.toasts.is_empty() && !env.hidden {
+    } else if !nui.toasts.is_empty() && !env.hidden && !env.interface_hidden {
         let screen = ctx.content_rect();
         egui::Area::new(egui::Id::unique("notification_toasts"))
             .fade_in(false)
@@ -1470,6 +1497,124 @@ mod tests {
         update_toasts(&mut list, &mut nui, 0.0, 30.0, true, false);
         assert!(nui.toasts.is_empty());
         assert_eq!(list.list.iter().map(|n| n.id).collect::<Vec<_>>(), vec![message]);
+    }
+
+    #[test]
+    fn interface_hidden_notices_wait_in_order_with_their_existing_deadlines() {
+        let mut list = Notifications::default();
+        let mut nui = NotifUi {
+            open: true,
+            ..Default::default()
+        };
+        let first = list.push(Kind::Info, "First", "", Data::None);
+        let dialog = list.push(
+            Kind::Script,
+            "Chair",
+            "Choose",
+            Data::Dialog {
+                sender: ([127, 0, 0, 1], 13000).into(),
+                object: Uuid::from_u128(9),
+                object_name: "Chair".into(),
+                own_object: false,
+                channel: -5,
+                buttons: vec!["Sit".into()],
+            },
+        );
+        let last = list.push_presence(JANE, "A friend is online.", true);
+
+        update_toasts_with_interface(&mut list, &mut nui, 0.0, 30.0, false, false, true);
+        assert_eq!(nui.toasts.iter().map(|(id, _)| *id).collect::<Vec<_>>(), [first, dialog, last]);
+        assert!(
+            list.list.iter().all(|n| !n.read),
+            "hidden interface does not mark the open list read"
+        );
+        assert_eq!(
+            shown_toasts(&list, &nui, false).0,
+            [first, dialog, last],
+            "script dialog remains pinned ahead of notices"
+        );
+
+        update_toasts_with_interface(&mut list, &mut nui, 2.0, 30.0, false, false, true);
+        assert_eq!(
+            nui.toasts.iter().find(|(id, _)| *id == first).map(|(_, until)| *until),
+            Some(TOAST_INFO)
+        );
+        assert_eq!(
+            nui.toasts.iter().find(|(id, _)| *id == last).map(|(_, until)| *until),
+            Some(TOAST_TIP)
+        );
+        // After the interface returns the same arrival and expiry order is
+        // retained; elapsed hidden time is not added back to the deadline.
+        update_toasts_with_interface(&mut list, &mut nui, 2.0, 30.0, false, false, false);
+        assert_eq!(nui.toasts.iter().map(|(id, _)| *id).collect::<Vec<_>>(), [first, dialog, last]);
+        update_toasts_with_interface(&mut list, &mut nui, TOAST_INFO + 0.1, 30.0, false, false, false);
+        assert!(!nui.toasts.iter().any(|(id, _)| *id == first));
+        assert!(nui.toasts.iter().any(|(id, _)| *id == last));
+        assert!(
+            nui.toasts.iter().any(|(id, _)| *id == dialog),
+            "interactive dialog does not time out"
+        );
+        update_toasts_with_interface(&mut list, &mut nui, TOAST_TIP + 0.1, 30.0, false, false, false);
+        assert!(!list.list.iter().any(|n| n.id == last), "expired transient notices leave the list");
+    }
+
+    #[test]
+    fn an_interface_hidden_script_dialog_is_drawn_after_unhide() {
+        let ctx = egui::Context::default();
+        let theme = crate::theme::Theme::default();
+        theme.apply(&ctx, 1.0);
+        let p = theme.palette();
+        let icons = Icons::default();
+        let world = World::new(std::sync::Arc::new(crate::scene::avatar::AvatarLibrary::load()));
+        let mut list = Notifications::default();
+        list.push(
+            Kind::Script,
+            "Hidden dialog marker",
+            "Choose a colour",
+            Data::Dialog {
+                sender: ([127, 0, 0, 1], 13000).into(),
+                object: Uuid::from_u128(9),
+                object_name: "Hidden dialog marker".into(),
+                own_object: false,
+                channel: -5,
+                buttons: vec!["Violet".into()],
+            },
+        );
+        let mut hist = crate::world::notification_history::History::default();
+        let mut nui = NotifUi::default();
+        let mut emoji = super::super::emoji::Emoji::load();
+        let pics = HashMap::new();
+        let images = HashMap::new();
+        let mut time = 0.0;
+        let mut frame = |interface_hidden: bool| {
+            time += 0.1;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 900.0))),
+                    time: Some(time),
+                    ..Default::default()
+                },
+                |ui| {
+                    let mut env = ToastEnv {
+                        pics: &pics,
+                        images: &images,
+                        emoji: &mut emoji,
+                        hidden: false,
+                        interface_hidden,
+                        message_seconds: 30.0,
+                        restart: None,
+                        presence_at: Default::default(),
+                        classic_bars: false,
+                    };
+                    show(ui.ctx(), &p, &icons, &world, &mut list, &mut hist, &mut nui, &mut env, false);
+                },
+            );
+            output.textures_delta.clear();
+            output.shapes.len()
+        };
+
+        assert_eq!(frame(true), 0, "hidden interface draws no notification overlay");
+        assert!(frame(false) > 0, "the dialog appears when the interface returns");
     }
 
     /// In do not disturb only a script menu toasts (#491): a message waits in

@@ -1,6 +1,6 @@
 //! The region restart of the agent's region, from the simulator's notice to
 //! the end of the alert: the rules of `world/region_restart.rs`, the alert
-//! of `ui/region_restart.rs` (or Firestorm's box), the sound, the shakes,
+//! of `ui/region_restart.rs` (or Legacy Viewer's box), the sound, the shakes,
 //! the taskbar, the bell's pinned card, the nearby chat line and the channel
 //! announcement (llviewermessage.cpp, llfloaterregionrestarting.cpp,
 //! originally LGPL 2.1), and the `AURORA_DEMO_RESTART` scenario.
@@ -25,12 +25,12 @@ pub struct State {
     pub ui: alert::RestartUi,
     /// The pinned card of the bell.
     bell: Option<u64>,
-    /// Firestorm's view shake, since then.
+    /// Legacy Viewer's view shake, since then.
     view_shake_at: Option<Instant>,
     last_tick: Option<Instant>,
     /// The landmarks of the inventory, by its generation.
     landmarks: (Option<u64>, Vec<Landmark>),
-    /// Firestorm's box: the landmark chosen in its list, and whether it is open.
+    /// Legacy Viewer's box: the landmark chosen in its list, and whether it is open.
     legacy_pick: Option<Uuid>,
     legacy_open: bool,
     /// AURORA_DEMO_RESTART.
@@ -165,7 +165,7 @@ impl App {
             );
             self.announce_restart(None);
         } else {
-            // no alert to close: the simulator's system message, as Firestorm
+            // no alert to close: the simulator's system message, as Legacy Viewer
             self.world.notifications.push(
                 Kind::Alert,
                 aurora_i18n::tr!("world-mod-simulator-alert"),
@@ -453,8 +453,11 @@ impl App {
             .map(|h| (h.title.clone(), h.global))
     }
 
-    /// Draw the alert (or Firestorm's box) and act on its clicks.
+    /// Draw the alert (or Legacy Viewer's box) and act on its clicks.
     pub(super) fn show_region_restart(&mut self, ctx: &egui::Context, p: &crate::theme::Palette) {
+        if self.interface.hidden {
+            return;
+        }
         let Some(a) = self.world.region_restart.alert.clone() else {
             self.region_restart.ui.layer = None;
             return;

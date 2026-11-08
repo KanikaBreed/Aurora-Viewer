@@ -17,7 +17,7 @@ impl App {
 
     /// The card, while it is due and no other dialog is open.
     pub(super) fn media_pack_card(&mut self, ctx: &egui::Context, p: &crate::theme::Palette) {
-        if !self.plugin_pack.asks() || self.updater.open || self.exit_prompt.open {
+        if !self.plugin_pack.asks() || self.updater.open || self.exit_prompt.open || self.interface.hidden {
             return;
         }
         if let Some(download) = ui::media_pack::card(ctx, p, &self.skin.icons) {

@@ -19,7 +19,7 @@ pub struct State {
 
 impl App {
     pub(super) fn joystick_status(&mut self, ctx: &egui::Context, p: &crate::theme::Palette) {
-        if !self.joystick.active {
+        if !flycam_status_visible(self.joystick.active, self.interface.hidden) {
             return;
         }
         let room = crate::ui::layout::work_area(ctx);
@@ -406,5 +406,22 @@ impl App {
         {
             self.toggle_joystick_flycam();
         }
+    }
+}
+
+fn flycam_status_visible(active: bool, interface_hidden: bool) -> bool {
+    active && !interface_hidden
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flycam_status_visible;
+
+    #[test]
+    fn flycam_status_follows_the_interface_without_changing_flycam_state() {
+        assert!(!flycam_status_visible(false, false));
+        assert!(flycam_status_visible(true, false));
+        assert!(!flycam_status_visible(false, true));
+        assert!(!flycam_status_visible(true, true));
     }
 }

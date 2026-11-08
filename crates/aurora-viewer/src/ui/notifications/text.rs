@@ -305,6 +305,7 @@ mod tests {
                             images: &HashMap::new(),
                             emoji: &mut emoji,
                             hidden: false,
+                            interface_hidden: false,
                             message_seconds: 30.0,
                             restart: None,
                             presence_at: Default::default(),

@@ -16880,7 +16880,7 @@ impl App {
                 // #465: a friendship offer in the middle of the screen, before
                 // the toasts it replaces (AURORA_DEMO_FRIEND_PROMPT: on for the run)
                 let prompt_on = self.settings.friend_request_prompt || (self.demo && crate::demo::friend_prompt::mode().is_some());
-                let prompt_allowed = !toasts_hidden && !dnd && self.world.notifications.started;
+                let prompt_allowed = !toasts_hidden && !self.interface.hidden && !dnd && self.world.notifications.started;
                 // #1404: a message to the whole region there too, first: the
                 // friendship offers wait behind it
                 // (AURORA_DEMO_REGION_MESSAGE: on for the run)
@@ -16934,6 +16934,7 @@ impl App {
                     images: &self.ui_images,
                     emoji: &mut self.emoji,
                     hidden: toasts_hidden,
+                    interface_hidden: self.interface.hidden,
                     message_seconds: f64::from(self.settings.im_toast_seconds),
                     restart,
                     presence_at,

@@ -40,6 +40,13 @@ use serde::{Deserialize, Serialize};
 
 const MAX_RECORD: u64 = 128 * 1024;
 const MAX_TRACE: u64 = 256 * 1024;
+/// The seconds the watcher saw the viewer's window hung when it ended, from
+/// outside the viewer (`native::watch`); absent when it answered.
+const WATCHER_HUNG: &str = "watcher-hung.txt";
+/// The viewer's window, for the watcher to look at from outside (Windows:
+/// its handle, written when it is first shown).
+#[cfg(windows)]
+const WINDOW_FILE: &str = "window.txt";
 static SESSION: OnceLock<Session> = OnceLock::new();
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -744,7 +751,8 @@ fn collect_os_events_once(dir: &Path) {
     let tick = watchdog::read_alive(dir)
         .iter()
         .find(|(k, _)| k == "tick")
-        .and_then(|(_, v)| v.parse().ok());
+        .and_then(|(_, v)| v.parse().ok())
+        .or_else(|| watchdog::alive_written(dir));
     os_events::collect(dir, stopped.or(tick));
 }
 
@@ -809,17 +817,30 @@ pub fn demo_thread_death() {
 /// answering, the watchdog saves its stacks, then the process is ended
 /// from outside like Task Manager's End task (exit code 1).
 pub fn demo_freeze() {
-    if std::env::var_os("AURORA_DEMO").is_none() || std::env::var("AURORA_DEMO_CRASH").as_deref() != Ok("freeze") {
+    if std::env::var_os("AURORA_DEMO").is_none() {
         return;
     }
-    std::thread::sleep(std::time::Duration::from_secs(watchdog::HUNG_AFTER + 8));
+    // `freeze-silent`: the watchdog stops with the main thread, as in the
+    // reports where it left no freeze (#3099, #3102, #3113), and the end is
+    // Windows' own for a window closed as not responding: only the watcher,
+    // from outside, can tell the freeze (Windows).
+    let (silent, code) = match std::env::var("AURORA_DEMO_CRASH").as_deref() {
+        Ok("freeze") => (false, 1),
+        Ok("freeze-silent") => (true, 0xCFFF_FFFFu32),
+        _ => return,
+    };
+    if silent {
+        watchdog::silence();
+    }
+    let seconds = if silent { 20 } else { watchdog::HUNG_AFTER + 8 };
+    std::thread::sleep(std::time::Duration::from_secs(seconds));
     #[cfg(windows)]
     // SAFETY: ends this process, as another program would.
     unsafe {
         use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
-        TerminateProcess(GetCurrentProcess(), 1);
+        TerminateProcess(GetCurrentProcess(), code);
     }
-    std::process::exit(1);
+    std::process::exit(code as i32);
 }
 
 #[cfg(test)]

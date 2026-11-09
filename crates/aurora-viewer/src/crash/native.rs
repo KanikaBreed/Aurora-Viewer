@@ -13,11 +13,17 @@ mod platform {
     };
     #[cfg(target_arch = "x86_64")]
     use windows_sys::Win32::System::{
-        Diagnostics::Debug::{CONTEXT, CONTEXT_FULL_AMD64, GetThreadContext, RtlLookupFunctionEntry, RtlVirtualUnwind, UNW_FLAG_NHANDLER},
+        Diagnostics::Debug::{
+            ADDRESS64, AddrModeFlat, CONTEXT, CONTEXT_FULL_AMD64, GetThreadContext, PFUNCTION_TABLE_ACCESS_ROUTINE64,
+            PGET_MODULE_BASE_ROUTINE64, PREAD_PROCESS_MEMORY_ROUTINE64, PTRANSLATE_ADDRESS_ROUTINE64, ReadProcessMemory,
+            RtlLookupFunctionEntry, RtlVirtualUnwind, STACKFRAME64, SYMOPT_DEFERRED_LOADS, SYMOPT_DISABLE_SYMSRV_AUTODETECT,
+            SYMOPT_FAIL_CRITICAL_ERRORS, SYMOPT_IGNORE_CVREC, SYMOPT_IGNORE_NT_SYMPATH, SYMOPT_NO_PROMPTS, UNW_FLAG_NHANDLER,
+        },
         Memory::{MEMORY_BASIC_INFORMATION, VirtualQuery},
+        SystemInformation::IMAGE_FILE_MACHINE_AMD64,
     };
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, FILETIME, HANDLE, HWND, LPARAM, LRESULT, WAIT_OBJECT_0, WPARAM},
+        Foundation::{CloseHandle, FILETIME, HANDLE, HWND, LPARAM, LRESULT, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM},
         System::{
             Diagnostics::Debug::{
                 AddVectoredExceptionHandler, EXCEPTION_CONTINUE_SEARCH, EXCEPTION_EXECUTE_HANDLER, EXCEPTION_POINTERS,
@@ -91,7 +97,7 @@ mod platform {
             return super::super::show_once(dir);
         }
         std::fs::write(dir.join("watching"), [])?;
-        anyhow::ensure!(wait_for_exit(dir, &process), "cannot wait for viewer");
+        anyhow::ensure!(wait_for_exit(dir, &process, record.pid), "cannot wait for viewer");
         let mut code = 1;
         // SAFETY: valid process handle and output pointer.
         anyhow::ensure!(unsafe { GetExitCodeProcess(process.0, &mut code) } != 0, "cannot query viewer exit");
@@ -111,7 +117,7 @@ mod platform {
     /// Waits for the viewer while a hidden window hears Windows end the
     /// session: the viewer is then stopped by the system, not crashed, and
     /// the `system-ending` marker keeps that from being reported.
-    fn wait_for_exit(dir: &Path, process: &Process) -> bool {
+    fn wait_for_exit(dir: &Path, process: &Process, pid: u32) -> bool {
         let _ = ENDING.set(dir.to_owned());
         let class: Vec<u16> = "AuroraCrashWatch\0".encode_utf16().collect();
         // SAFETY: the class name lives until the end of this function, the
@@ -145,9 +151,26 @@ mod platform {
             if window.is_null() {
                 return WaitForSingleObject(process.0, INFINITE) == WAIT_OBJECT_0;
             }
+            // once a second, the viewer's window seen from outside: a
+            // freeze that stopped the viewer's own watchdog too is still
+            // recorded (#3099, #3102, #3113)
+            let mut view = super::super::watchdog::OutsideView::default();
+            let mut recorded = false;
+            let mut stacks = super::super::watchdog::OutsideStacks::default();
             loop {
-                match MsgWaitForMultipleObjects(1, &process.0, 0, INFINITE, QS_ALLINPUT) {
+                match MsgWaitForMultipleObjects(1, &process.0, 0, 1000, QS_ALLINPUT) {
                     WAIT_OBJECT_0 => return true,
+                    WAIT_TIMEOUT => {
+                        let window = super::super::read_limited(&dir.join(super::super::WINDOW_FILE), 32)
+                            .ok()
+                            .and_then(|text| text.trim().parse::<usize>().ok());
+                        if let Some(window) = window {
+                            let now = std::time::Instant::now();
+                            let seconds = view.look(window_hung(window), now);
+                            super::super::watchdog::record_outside(dir, seconds, &mut recorded);
+                            stacks.look(dir, pid, window, seconds, now);
+                        }
+                    }
                     r if r == WAIT_OBJECT_0 + 1 => {
                         let mut msg: MSG = std::mem::zeroed();
                         while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
@@ -249,11 +272,17 @@ mod platform {
     /// This process's threads with their names (`aurora-render`…), for
     /// the freeze report; a thread without a name is skipped.
     pub fn named_threads() -> Vec<(u32, String)> {
+        // SAFETY: no argument.
+        named_threads_of(unsafe { windows_sys::Win32::System::Threading::GetCurrentProcessId() })
+    }
+
+    /// The same for the process `pid` (the watcher's view of the viewer).
+    fn named_threads_of(pid: u32) -> Vec<(u32, String)> {
         use windows_sys::Win32::Foundation::{INVALID_HANDLE_VALUE, LocalFree};
         use windows_sys::Win32::System::Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
         };
-        use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetThreadDescription, THREAD_QUERY_LIMITED_INFORMATION};
+        use windows_sys::Win32::System::Threading::{GetThreadDescription, THREAD_QUERY_LIMITED_INFORMATION};
         let mut out = Vec::new();
         // SAFETY: every handle opened here is closed before returning, the
         // entry is sized as the snapshot calls expect, and the description
@@ -263,12 +292,11 @@ mod platform {
             if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
                 return out;
             }
-            let own = GetCurrentProcessId();
             let mut entry: THREADENTRY32 = std::mem::zeroed();
             entry.dwSize = size_of::<THREADENTRY32>() as u32;
             let mut more = Thread32First(snapshot, &mut entry) != 0;
             while more {
-                if entry.th32OwnerProcessID == own {
+                if entry.th32OwnerProcessID == pid {
                     let handle = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, 0, entry.th32ThreadID);
                     if !handle.is_null() {
                         let mut text = std::ptr::null_mut();
@@ -288,6 +316,183 @@ mod platform {
             CloseHandle(snapshot);
         }
         out
+    }
+
+    /// From the watcher, while the viewer's window is hung and its own
+    /// watchdog stopped with it: the stacks of the thread that owns the
+    /// window (the main one) and of the threads named in `names`, in the
+    /// format of `freeze.txt`. Nothing the viewer holds can block this
+    /// process: each thread is suspended while its frames are walked with
+    /// the debug-help library from the viewer's own unwind tables, then
+    /// resumed. The library is loaded from System32 only now, never with
+    /// the viewer, and finds no symbol files: only module + offset are
+    /// written, as in the viewer.
+    #[cfg(target_arch = "x86_64")]
+    pub fn write_outside_stacks(out: &mut Vec<u8>, pid: u32, window: usize, names: &[&str]) -> bool {
+        use windows_sys::Win32::System::Threading::{PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+        let Some(help) = DebugHelp::load() else { return false };
+        // SAFETY: no borrowed pointers; the rights the debug-help library
+        // needs to read the modules and stacks.
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+        let process = Process(handle);
+        let mut owner = 0;
+        // SAFETY: a stale handle only answers 0.
+        let main = unsafe { GetWindowThreadProcessId(window as HWND, &mut owner) };
+        let mut threads: Vec<(u32, String)> = Vec::new();
+        if main != 0 && owner == pid {
+            threads.push((main, "main".to_owned()));
+        }
+        threads.extend(named_threads_of(pid).into_iter().filter(|(_, name)| names.contains(&name.as_str())));
+        // A folder without symbol files: no PDB search, no symbol server.
+        let nowhere: Vec<u16> = "\\nowhere\0".encode_utf16().collect();
+        // SAFETY: the options are flags; the path lives until the end of
+        // this function and the process handle is live.
+        unsafe {
+            (help.set_options)(
+                SYMOPT_DEFERRED_LOADS
+                    | SYMOPT_FAIL_CRITICAL_ERRORS
+                    | SYMOPT_NO_PROMPTS
+                    | SYMOPT_IGNORE_CVREC
+                    | SYMOPT_IGNORE_NT_SYMPATH
+                    | SYMOPT_DISABLE_SYMSRV_AUTODETECT,
+            );
+            if (help.initialize)(process.0, nowhere.as_ptr(), 1) == 0 {
+                return false;
+            }
+        }
+        let mut any = false;
+        for (id, name) in threads {
+            out.extend_from_slice(format!("Thread: {name}\n").as_bytes());
+            any |= Thread::open(id).is_some_and(|thread| help.write_stack(out, process.0, thread.0));
+        }
+        // SAFETY: initialized above for this handle.
+        unsafe { (help.cleanup)(process.0) };
+        any
+    }
+
+    // The signatures of the debug-help exports the watcher uses.
+    #[cfg(target_arch = "x86_64")]
+    type Export = unsafe extern "system" fn() -> isize;
+    #[cfg(target_arch = "x86_64")]
+    type SymSetOptions = unsafe extern "system" fn(u32) -> u32;
+    #[cfg(target_arch = "x86_64")]
+    type SymInitializeW = unsafe extern "system" fn(HANDLE, *const u16, i32) -> i32;
+    #[cfg(target_arch = "x86_64")]
+    type SymCleanup = unsafe extern "system" fn(HANDLE) -> i32;
+    #[cfg(target_arch = "x86_64")]
+    type StackWalk64 = unsafe extern "system" fn(
+        u32,
+        HANDLE,
+        HANDLE,
+        *mut STACKFRAME64,
+        *mut c_void,
+        PREAD_PROCESS_MEMORY_ROUTINE64,
+        PFUNCTION_TABLE_ACCESS_ROUTINE64,
+        PGET_MODULE_BASE_ROUTINE64,
+        PTRANSLATE_ADDRESS_ROUTINE64,
+    ) -> i32;
+    #[cfg(target_arch = "x86_64")]
+    type SymFunctionTableAccess64 = unsafe extern "system" fn(HANDLE, u64) -> *mut c_void;
+    #[cfg(target_arch = "x86_64")]
+    type SymGetModuleBase64 = unsafe extern "system" fn(HANDLE, u64) -> u64;
+
+    /// The debug-help functions the watcher walks the viewer's stacks with.
+    #[cfg(target_arch = "x86_64")]
+    struct DebugHelp {
+        set_options: SymSetOptions,
+        initialize: SymInitializeW,
+        cleanup: SymCleanup,
+        stack_walk: StackWalk64,
+        function_table: SymFunctionTableAccess64,
+        module_base: SymGetModuleBase64,
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    impl DebugHelp {
+        /// From System32 alone: a `dbghelp.dll` beside the viewer is never
+        /// loaded. Kept loaded until the watcher ends.
+        fn load() -> Option<DebugHelp> {
+            use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW};
+            let file: Vec<u16> = "dbghelp.dll\0".encode_utf16().collect();
+            // SAFETY: a zero-ended name; the library stays loaded (never
+            // freed), so the functions taken from it stay valid.
+            unsafe {
+                let library = LoadLibraryExW(file.as_ptr(), std::ptr::null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32);
+                if library.is_null() {
+                    return None;
+                }
+                let function = |name: &[u8]| GetProcAddress(library, name.as_ptr());
+                // SAFETY (each transmute): the documented signature of that
+                // export of dbghelp.dll, with the same ABI.
+                Some(DebugHelp {
+                    set_options: std::mem::transmute::<Export, SymSetOptions>(function(b"SymSetOptions\0")?),
+                    initialize: std::mem::transmute::<Export, SymInitializeW>(function(b"SymInitializeW\0")?),
+                    cleanup: std::mem::transmute::<Export, SymCleanup>(function(b"SymCleanup\0")?),
+                    stack_walk: std::mem::transmute::<Export, StackWalk64>(function(b"StackWalk64\0")?),
+                    function_table: std::mem::transmute::<Export, SymFunctionTableAccess64>(function(b"SymFunctionTableAccess64\0")?),
+                    module_base: std::mem::transmute::<Export, SymGetModuleBase64>(function(b"SymGetModuleBase64\0")?),
+                })
+            }
+        }
+
+        /// One thread of the viewer, as `write_modules` writes it.
+        fn write_stack(&self, out: &mut Vec<u8>, process: HANDLE, thread: HANDLE) -> bool {
+            #[repr(C, align(16))]
+            struct Aligned(CONTEXT);
+            let mut addresses = Vec::with_capacity(FRAMES);
+            // SAFETY: both handles are live with the rights asked; the
+            // thread is resumed on every path. The walk reads the other
+            // process through the system, never its memory directly.
+            unsafe {
+                // The routines the walk calls back: the library's own.
+                let function_table: PFUNCTION_TABLE_ACCESS_ROUTINE64 = Some(self.function_table);
+                let module_base: PGET_MODULE_BASE_ROUTINE64 = Some(self.module_base);
+                if SuspendThread(thread) == u32::MAX {
+                    return false;
+                }
+                let mut context = Aligned(std::mem::zeroed());
+                context.0.ContextFlags = CONTEXT_FULL_AMD64;
+                if GetThreadContext(thread, &mut context.0) != 0 {
+                    let flat = |offset| ADDRESS64 {
+                        Offset: offset,
+                        Segment: 0,
+                        Mode: AddrModeFlat,
+                    };
+                    let mut frame: STACKFRAME64 = std::mem::zeroed();
+                    frame.AddrPC = flat(context.0.Rip);
+                    frame.AddrFrame = flat(context.0.Rbp);
+                    frame.AddrStack = flat(context.0.Rsp);
+                    while addresses.len() < FRAMES
+                        && (self.stack_walk)(
+                            u32::from(IMAGE_FILE_MACHINE_AMD64),
+                            process,
+                            thread,
+                            &mut frame,
+                            (&mut context.0 as *mut CONTEXT).cast(),
+                            None,
+                            function_table,
+                            module_base,
+                            None,
+                        ) != 0
+                        && frame.AddrPC.Offset != 0
+                    {
+                        addresses.push(frame.AddrPC.Offset as usize);
+                    }
+                }
+                ResumeThread(thread);
+            }
+            if addresses.is_empty() {
+                return false;
+            }
+            // SAFETY: the library is initialized for this process meanwhile.
+            let locate = |address: usize| unsafe { (self.module_base)(process, address as u64) } as usize;
+            write_frames(out, addresses, None, locate, |base| Module::read_from(process, base));
+            true
+        }
     }
 
     /// A handle to a thread with the rights the freeze report needs.
@@ -442,6 +647,36 @@ mod platform {
     /// is gone. No allocation, no loader lock, no symbol engine: this runs
     /// inside the exception filter.
     pub(super) fn write_modules(out: &mut impl Write, frames: &[*mut c_void], fault: Option<*mut c_void>) {
+        let locate = |address: usize| {
+            let mut base = std::ptr::null_mut();
+            // SAFETY: a lookup in the loader's inverted function table, the
+            // one exception dispatch itself has just used to reach this filter.
+            unsafe { RtlPcToFileHeader(address as *const c_void, &mut base) };
+            base as usize
+        };
+        // SAFETY: a non-null base came from RtlPcToFileHeader for a frame of
+        // this process: the start of an image mapped here, which a module on
+        // the stack is not unloaded under.
+        let module = |base: usize| unsafe { Module::read(base) };
+        write_frames(
+            out,
+            frames.iter().map(|&frame| frame as usize),
+            fault.map(|fault| fault as usize),
+            locate,
+            module,
+        );
+    }
+
+    /// The frames as `name+0xoffset`, then each module met with its PDB
+    /// identity; `locate` gives an address's module base (0 when none) and
+    /// `module` reads that module's headers.
+    fn write_frames(
+        out: &mut impl Write,
+        frames: impl IntoIterator<Item = usize>,
+        fault: Option<usize>,
+        locate: impl Fn(usize) -> usize,
+        module: impl Fn(usize) -> Option<Module>,
+    ) {
         let mut bases = [0usize; FRAMES + 1];
         let mut known = 0;
         let mut seen = |base: usize| {
@@ -452,18 +687,16 @@ mod platform {
         };
         if let Some(fault) = fault {
             let _ = write!(out, "Fault: ");
-            seen(write_location(out, fault));
+            seen(write_location(out, fault, &locate, &module));
         }
         let _ = writeln!(out, "Native stack (modules):");
-        for (index, &address) in frames.iter().enumerate() {
+        for (index, address) in frames.into_iter().enumerate() {
             let _ = write!(out, "{index:02}: ");
-            seen(write_location(out, address));
+            seen(write_location(out, address, &locate, &module));
         }
         let _ = writeln!(out, "Modules:");
         for &base in &bases[..known] {
-            // SAFETY: base came from RtlPcToFileHeader for a frame of this
-            // process; a module on the stack is not unloaded under it.
-            let Some(module) = (unsafe { Module::read(base) }) else { continue };
+            let Some(module) = module(base) else { continue };
             let _ = write!(out, "{}", module.name());
             if let Some(guid) = module.guid {
                 let data1 = u32::from_le_bytes([guid[0], guid[1], guid[2], guid[3]]);
@@ -482,16 +715,16 @@ mod platform {
 
     /// Writes `name+0xoffset` (or `?` outside any module) and a line end;
     /// returns the module base, 0 when unknown.
-    fn write_location(out: &mut impl Write, address: *mut c_void) -> usize {
-        let mut base = std::ptr::null_mut();
-        // SAFETY: a lookup in the loader's inverted function table, the one
-        // exception dispatch itself has just used to reach this filter.
-        unsafe { RtlPcToFileHeader(address, &mut base) };
-        let base = base as usize;
-        // SAFETY: a non-null base is the start of an image mapped here.
-        match (base != 0).then(|| unsafe { Module::read(base) }).flatten() {
+    fn write_location(
+        out: &mut impl Write,
+        address: usize,
+        locate: &impl Fn(usize) -> usize,
+        module: &impl Fn(usize) -> Option<Module>,
+    ) -> usize {
+        let base = locate(address);
+        match (base != 0).then(|| module(base)).flatten() {
             Some(module) => {
-                let _ = writeln!(out, "{}+0x{:x}", module.name(), address as usize - base);
+                let _ = writeln!(out, "{}+0x{:x}", module.name(), address - base);
                 base
             }
             None => {
@@ -528,20 +761,51 @@ mod platform {
         /// page and every range inside SizeOfImage that the headers name are
         /// readable.
         unsafe fn read(base: usize) -> Option<Module> {
+            Self::parse(&|offset, buffer: &mut [u8]| {
+                // SAFETY: `parse` only asks for ranges inside the first page
+                // or inside SizeOfImage, readable as the caller promised.
+                unsafe { std::ptr::copy_nonoverlapping((base + offset) as *const u8, buffer.as_mut_ptr(), buffer.len()) };
+                true
+            })
+        }
+
+        /// The same from the watcher, in the viewer's memory: a page it
+        /// cannot read only loses that module's name.
+        #[cfg(target_arch = "x86_64")]
+        fn read_from(process: HANDLE, base: usize) -> Option<Module> {
+            Self::parse(&|offset, buffer: &mut [u8]| {
+                let mut done = 0;
+                // SAFETY: the buffer is ours and as long as asked; the
+                // system checks the other process's range itself.
+                let read = unsafe {
+                    ReadProcessMemory(
+                        process,
+                        (base + offset) as *const c_void,
+                        buffer.as_mut_ptr().cast(),
+                        buffer.len(),
+                        &mut done,
+                    )
+                };
+                read != 0 && done == buffer.len()
+            })
+        }
+
+        /// The headers and the CodeView record through `read`, which fills a
+        /// buffer from an offset into the image and says whether it could.
+        /// Every offset asked lies in the first page or inside SizeOfImage.
+        /// No allocation: this also runs inside the exception filter.
+        fn parse(read: &impl Fn(usize, &mut [u8]) -> bool) -> Option<Module> {
             const PAGE: usize = 4096;
-            let at = |offset: usize| (base + offset) as *const u8;
-            // SAFETY: the headers' first page is readable (see above).
-            let nt = unsafe {
-                if std::ptr::read_unaligned(at(0).cast::<u16>()) != 0x5A4D {
-                    return None;
-                }
-                std::ptr::read_unaligned(at(0x3C).cast::<u32>()) as usize
-            };
+            let mut word = [0u8; 4];
+            if !read(0, &mut word[..2]) || u16::from_le_bytes([word[0], word[1]]) != 0x5A4D || !read(0x3C, &mut word) {
+                return None;
+            }
+            let nt = u32::from_le_bytes(word) as usize;
             if nt + size_of::<IMAGE_NT_HEADERS64>() > PAGE {
                 return None;
             }
-            // SAFETY: bounded to the first page just above.
-            let headers = unsafe { std::ptr::read_unaligned(at(nt).cast::<IMAGE_NT_HEADERS64>()) };
+            // SAFETY: plain data, valid for any bytes.
+            let headers = unsafe { plain::<IMAGE_NT_HEADERS64>(read, nt) }?;
             let optional = headers.OptionalHeader;
             if headers.Signature != 0x4550 || optional.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC {
                 return None;
@@ -566,14 +830,22 @@ mod platform {
             }
             let entry = size_of::<IMAGE_DEBUG_DIRECTORY>();
             for i in 0..(length / entry).min(16) {
-                // SAFETY: inside the debug directory, itself inside the image.
-                let debug = unsafe { std::ptr::read_unaligned(at(start + i * entry).cast::<IMAGE_DEBUG_DIRECTORY>()) };
+                // SAFETY: plain data, valid for any bytes; inside the debug
+                // directory, itself inside the image.
+                let Some(debug) = (unsafe { plain::<IMAGE_DEBUG_DIRECTORY>(read, start + i * entry) }) else {
+                    continue;
+                };
                 let (data, length) = (debug.AddressOfRawData as usize, debug.SizeOfData as usize);
                 if debug.Type != IMAGE_DEBUG_TYPE_CODEVIEW || data == 0 || length < 24 || data + length > size {
                     continue;
                 }
-                // SAFETY: the CodeView record lies inside the image (checked).
-                let record = unsafe { std::slice::from_raw_parts(at(data), length) };
+                // RSDS, GUID, age, then the PDB path (MAX_PATH at most).
+                let mut record = [0u8; 24 + 260];
+                let length = length.min(record.len());
+                if !read(data, &mut record[..length]) {
+                    continue;
+                }
+                let record = &record[..length];
                 if &record[..4] != b"RSDS" {
                     continue;
                 }
@@ -597,6 +869,18 @@ mod platform {
             }
             Some(module)
         }
+    }
+
+    /// A `T` read through `read` at `offset`.
+    ///
+    /// # Safety
+    /// Every bit pattern is a valid `T` (the PE header structures).
+    unsafe fn plain<T: Copy>(read: &impl Fn(usize, &mut [u8]) -> bool, offset: usize) -> Option<T> {
+        let mut value = std::mem::MaybeUninit::<T>::zeroed();
+        // SAFETY: the bytes of a zeroed local, as long as T.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(value.as_mut_ptr().cast::<u8>(), size_of::<T>()) };
+        // SAFETY: filled by `read` or left zeroed, either valid (see above).
+        read(offset, bytes).then(|| unsafe { value.assume_init() })
     }
 
     pub fn demo_exception() -> ! {
@@ -680,6 +964,44 @@ mod platform {
             assert!(frames.len() > 4, "{text}");
             assert!(frames.iter().any(|f| f.contains("aurora_viewer")), "{text}");
             assert!(modules(&text).iter().any(|line| line.starts_with("ntdll ")), "{text}");
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        #[test]
+        fn the_watcher_reads_a_named_thread_s_stack_through_the_debug_help_library() {
+            let (ids, id) = std::sync::mpsc::channel();
+            let (release, wait) = std::sync::mpsc::channel::<()>();
+            let blocked = std::thread::Builder::new()
+                .name("aurora-crash-test-outside".into())
+                .spawn(move || {
+                    // SAFETY: no argument.
+                    ids.send(unsafe { GetCurrentThreadId() }).unwrap();
+                    let _ = wait.recv();
+                })
+                .unwrap();
+            id.recv().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            // SAFETY: no argument.
+            let pid = unsafe { windows_sys::Win32::System::Threading::GetCurrentProcessId() };
+            let mut out = Vec::new();
+            // no window: only the named thread
+            let read = write_outside_stacks(&mut out, pid, 0, &["aurora-crash-test-outside"]);
+            release.send(()).unwrap();
+            blocked.join().unwrap();
+            let text = String::from_utf8(out).unwrap();
+            assert!(read, "{text}");
+            assert!(
+                text.starts_with("Thread: aurora-crash-test-outside\nNative stack (modules):\n"),
+                "{text}"
+            );
+            let frames: Vec<_> = text.lines().filter(|line| line.contains("+0x")).collect();
+            assert!(frames.len() > 4, "{text}");
+            assert!(frames.iter().any(|f| f.contains("aurora_viewer")), "{text}");
+            let own = modules(&text)
+                .into_iter()
+                .find(|line| line.starts_with("aurora_viewer"))
+                .expect("own module");
+            assert!(own.contains(" id=") && own.contains(" code="), "{own}");
         }
     }
 }

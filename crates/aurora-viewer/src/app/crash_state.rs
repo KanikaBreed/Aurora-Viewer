@@ -304,6 +304,17 @@ pub(super) fn effects(settings: &crate::settings::Settings, vr: bool) -> String 
     for diag in aurora_render::diagnostic_words() {
         word(true, format_args!("{diag}"));
     }
+    // the freeze test build's conditions (#3099)
+    word(super::FREEZE_TEST.no_audio, format_args!("diag-no-audio"));
+    word(super::FREEZE_TEST.no_voice, format_args!("diag-no-voice"));
+    word(super::FREEZE_TEST.no_media, format_args!("diag-no-media"));
+    let set = |name: &str| std::env::var(name).is_ok_and(|v| !v.trim().is_empty());
+    word(set("AURORA_FETCH_SLOTS"), format_args!("diag-fetch-slots"));
+    word(
+        std::env::var("AURORA_TEXTURE_BC7").is_ok_and(|v| v == "0"),
+        format_args!("diag-bc7-off"),
+    );
+    word(set("AURORA_PRESENT_MODE"), format_args!("diag-present"));
     out
 }
 

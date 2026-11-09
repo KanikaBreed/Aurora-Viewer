@@ -162,6 +162,13 @@ pub const EFFECT_WORDS: &[&str] = &[
     "diag-ao-gtao",
     "diag-ao-alt",
     "diag-unknown",
+    // the freeze test build's conditions (app.rs `FREEZE_TEST`, #3099)
+    "diag-no-audio",
+    "diag-no-voice",
+    "diag-no-media",
+    "diag-fetch-slots",
+    "diag-bc7-off",
+    "diag-present",
 ];
 
 /// The names `window_state` takes.

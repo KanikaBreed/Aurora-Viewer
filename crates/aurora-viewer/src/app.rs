@@ -1266,6 +1266,25 @@ fn wanted_interface_colors(settings: &Settings) -> crate::interface_colors::Inte
     settings.interface_colors.clone()
 }
 
+/// The freeze test build's switches (#3099, #3102, #3113), read once:
+/// `AURORA_TEST_NO_AUDIO=1` opens no sound device, `AURORA_TEST_NO_VOICE=1`
+/// never connects voice, `AURORA_TEST_NO_MEDIA=1` loads no web page or video
+/// on faces. Nothing is saved; the crash report names them (`diag-no-…`).
+pub(crate) struct FreezeTest {
+    pub no_audio: bool,
+    pub no_voice: bool,
+    pub no_media: bool,
+}
+
+pub(crate) static FREEZE_TEST: std::sync::LazyLock<FreezeTest> = std::sync::LazyLock::new(|| {
+    let on = |name: &str| std::env::var(name).is_ok_and(|v| v.trim() == "1");
+    FreezeTest {
+        no_audio: on("AURORA_TEST_NO_AUDIO"),
+        no_voice: on("AURORA_TEST_NO_VOICE"),
+        no_media: on("AURORA_TEST_NO_MEDIA"),
+    }
+});
+
 /// Test overrides of the settings (used by automated captures): the
 /// graphics level first, so that the single settings after it still change
 /// it. Applied at start, and again after a new profile's level is chosen.
@@ -1771,13 +1790,18 @@ impl App {
             app_link_parcels: HashSet::new(),
             parcel_music: Default::default(),
             music_status: Default::default(),
-            audio_engine: match aurora_audio::AudioEngine::new_with_device(out_device) {
-                Ok(e) => {
+            audio_engine: match (!FREEZE_TEST.no_audio).then(|| aurora_audio::AudioEngine::new_with_device(out_device)) {
+                // the freeze test build's switch: no sound device at all
+                None => {
+                    log::warn!("audio off for this test (AURORA_TEST_NO_AUDIO)");
+                    None
+                }
+                Some(Ok(e)) => {
                     let o = e.output_info();
                     log::info!("audio: {} ({} Hz, {} canaux)", o.device_name, o.sample_rate, o.channels);
                     Some(e)
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     log::warn!("audio disabled: {e}");
                     None
                 }
@@ -6588,7 +6612,7 @@ impl App {
         };
         let transmit = self.talking();
         let inputs = crate::voice::VoiceInputs {
-            enabled: self.settings.audio.voice_enabled,
+            enabled: self.settings.audio.voice_enabled && !FREEZE_TEST.no_voice,
             in_world: self.in_world(),
             offline: self.demo,
             tuning,
@@ -10050,7 +10074,9 @@ impl App {
                     cache_dir: &cache_dir,
                     language: aurora_i18n::language(),
                 };
-                self.media.update(&mut self.world, &mut self.scene, &mut gfx.renderer, &frame);
+                if !FREEZE_TEST.no_media {
+                    self.media.update(&mut self.world, &mut self.scene, &mut gfx.renderer, &frame);
+                }
                 self.options_ui.media_plugins = self
                     .media
                     .plugins_found()

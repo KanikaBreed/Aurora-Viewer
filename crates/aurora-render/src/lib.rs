@@ -108,6 +108,7 @@ pub use arena::MeshAlloc;
 // What a tile of a photo draws around what it keeps, for the bloom, the
 // depth of field and the contact shadows (snapshot tiles in the viewer).
 pub use bloom::tile_reach as bloom_tile_reach;
+pub use contact_shadows::diagnostic_words;
 pub use contact_shadows::tile_reach as contact_tile_reach;
 pub use dof::tile_reach as dof_tile_reach;
 pub use drawn_pick::{Drawn, DrawnFace, DrawnMode};
@@ -1061,10 +1062,20 @@ fn probe(@builtin(global_invocation_id) id:vec3<u32>) {{
         let (count, hard) = crate::contact_shadows::samples(100.0);
         validate(&crate::contact_shadows::shader_source(count, hard));
         // the diagnostic variants (AURORA_CONTACT_VARIANT)
+        use crate::contact_shadows::ZeroInit;
         use crate::contact_shadows::{Variant, variant_source};
-        for v in [Variant::NoEarlyOut, Variant::NoShared, Variant::Short] {
+        for v in [
+            Variant::NoEarlyOut,
+            Variant::NoShared,
+            Variant::Short,
+            Variant::NoStore,
+            Variant::AtomicClaim,
+        ] {
             validate(&variant_source(v));
+            validate(&ZeroInit::Explicit.source(variant_source(v)));
         }
+        validate(&ZeroInit::Explicit.source(variant_source(Variant::Bend)));
+        validate(&ZeroInit::Explicit.source(crate::contact_shadows::shader_source(192, 13)));
     }
 
     #[test]

@@ -71,7 +71,7 @@ pub fn consume_next_session(settings_path: &Path) -> std::io::Result<Startup> {
 
 fn env_values(environment: &crate::settings::DiagnosticEnvironment) -> [(&'static str, Option<String>); 6] {
     let contact = match environment.contact_variant.as_str() {
-        "no-early-out" | "no-shared" | "short" | "skip" => Some(environment.contact_variant.clone()),
+        "no-early-out" | "no-shared" | "short" | "skip" | "no-store" | "atomic-claim" => Some(environment.contact_variant.clone()),
         _ => None,
     };
     let budget = environment

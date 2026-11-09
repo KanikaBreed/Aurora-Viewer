@@ -300,6 +300,10 @@ pub(super) fn effects(settings: &crate::settings::Settings, vr: bool) -> String 
     word(true, format_args!("draw{}", settings.draw_distance.round() as u32));
     word(settings.hdr_emissive, format_args!("hdr"));
     word(vr, format_args!("vr"));
+    // the comparisons of the GPU-loss test build's variables (#3000)
+    for diag in aurora_render::diagnostic_words() {
+        word(true, format_args!("{diag}"));
+    }
     out
 }
 

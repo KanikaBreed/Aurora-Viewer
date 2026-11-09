@@ -1301,6 +1301,17 @@ fn log(path: &Path) -> (String, String) {
 mod tests {
     use super::*;
 
+    /// Every word of the GPU-loss test build's variables reaches the report,
+    /// alone or after the settings' words.
+    #[test]
+    fn the_gpu_test_variables_are_published_in_the_effects() {
+        let all = "diag-cs-off,diag-cs-on,diag-cs-alt,diag-cs-prepass,diag-cs-shell,diag-cs-no-early-out,diag-cs-no-shared,diag-cs-short,diag-cs-skip,diag-cs-no-store,diag-cs-atomic-claim,diag-wg-explicit,diag-ao-legacy,diag-ao-gtao,diag-ao-alt,diag-unknown";
+        assert_eq!(state_value(all).as_deref(), Some(all));
+        let list = "shadows3,contact-shadows,ao-gtao2,aa-smaa,scale100,draw192,diag-cs-atomic-claim,diag-wg-explicit";
+        assert_eq!(state_value(list).as_deref(), Some(list));
+        assert_eq!(state_value("shadows3,diag-cs-whatever"), None);
+    }
+
     #[test]
     fn operating_system_gpu_evidence_is_labeled_and_redacted() {
         let linux = os_gpu_event_summary(
@@ -1877,7 +1888,7 @@ mod tests {
         let body = build_at(&record, &dir, None).body;
         assert!(
             body.contains(
-                "| Overlay hooks | Discord (in-game overlay or Go Live capture), DiscordHook64.dll; \
+                "| Overlay hooks | Discord legacy game hook, DiscordHook64.dll; \
                  RivaTuner Statistics Server (MSI Afterburner's on-screen display), RTSSHooks64.dll |"
             ),
             "{body}"
@@ -2080,7 +2091,7 @@ mod tests {
         .unwrap();
         let body = build_at(&record, &dir, None).body;
         assert!(
-            body.contains("| Overlay hooks at GPU loss | Discord (in-game overlay or Go Live capture), DiscordHook64.dll |"),
+            body.contains("| Overlay hooks at GPU loss | Discord legacy game hook, DiscordHook64.dll |"),
             "{body}"
         );
         assert!(!body.contains("Private") && !body.contains("evil"), "{body}");

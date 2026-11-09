@@ -361,6 +361,16 @@ pub(crate) enum Variant {
     /// No dispatch of the shader at all (the mask stays cleared, then
     /// filtered): no contact shadow.
     Skip,
+    /// The whole raymarch runs, but its result is stored only behind a test
+    /// no pixel passes (a shadow value below -1), so the compiler keeps the
+    /// work and no wavefront writes the mask: no contact shadow. Tells the
+    /// work of the pass from its overlapping stores (from PR #2458).
+    NoStore,
+    /// One writer per pixel: an atomic claim bit per pixel, set before the
+    /// store, so where the wavefronts of one dispatch meet only the first
+    /// stores (from PR #2458). Same mask up to which of the equal-or-near
+    /// values wins. Its bitmap (binding 3) exists only in this variant.
+    AtomicClaim,
 }
 
 impl Variant {
@@ -370,21 +380,152 @@ impl Variant {
             Some("no-shared") => Variant::NoShared,
             Some("short") => Variant::Short,
             Some("skip") => Variant::Skip,
+            Some("no-store") => Variant::NoStore,
+            Some("atomic-claim") => Variant::AtomicClaim,
             _ => Variant::Bend,
+        }
+    }
+
+    /// Whether `raw` names a variant (the empty value and `bend` are the
+    /// shader as it is).
+    pub(crate) fn known(raw: &str) -> bool {
+        let raw = raw.trim().to_ascii_lowercase();
+        raw.is_empty() || raw == "bend" || Variant::parse(Some(&raw)) != Variant::Bend
+    }
+
+    /// The report's word for the variant (`diag-cs-…`), none for Bend's.
+    pub(crate) fn word(self) -> Option<&'static str> {
+        match self {
+            Variant::Bend => None,
+            Variant::NoEarlyOut => Some("diag-cs-no-early-out"),
+            Variant::NoShared => Some("diag-cs-no-shared"),
+            Variant::Short => Some("diag-cs-short"),
+            Variant::Skip => Some("diag-cs-skip"),
+            Variant::NoStore => Some("diag-cs-no-store"),
+            Variant::AtomicClaim => Some("diag-cs-atomic-claim"),
         }
     }
 
     pub(crate) fn from_env() -> Self {
         static VARIANT: std::sync::OnceLock<Variant> = std::sync::OnceLock::new();
         *VARIANT.get_or_init(|| {
-            let v = Variant::parse(std::env::var("AURORA_CONTACT_VARIANT").ok().as_deref());
+            let raw = std::env::var("AURORA_CONTACT_VARIANT").ok();
+            let v = Variant::parse(raw.as_deref());
             if v != Variant::Bend {
                 log::info!("contact shadows: diagnostic variant {v:?} (AURORA_CONTACT_VARIANT)");
+            } else if let Some(raw) = raw.filter(|raw| !Variant::known(raw)) {
+                log::warn!("contact shadows: AURORA_CONTACT_VARIANT={raw:?} unknown, using default");
             }
             v
         })
     }
 }
+
+/// `AURORA_WG_ZERO_INIT=explicit`: the contact-shadow pipelines are built
+/// without wgpu's zeroing of workgroup memory (which a driver with
+/// `VK_KHR_zero_initialize_workgroup_memory` does itself), and the shader
+/// zeroes the one variable that needs it (`any_live`) itself, before a
+/// barrier. Every other array is written in full before it is read. A
+/// comparison of the AMD driver's own zeroing (wgpu #4591 on RDNA1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ZeroInit {
+    Default,
+    Explicit,
+}
+
+impl ZeroInit {
+    pub(crate) fn parse(v: Option<&str>) -> Option<Self> {
+        match v.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+            None | Some("" | "default" | "native") => Some(ZeroInit::Default),
+            Some("explicit" | "polyfill" | "shader") => Some(ZeroInit::Explicit),
+            Some(_) => None,
+        }
+    }
+
+    pub(crate) fn from_env() -> Self {
+        static MODE: std::sync::OnceLock<ZeroInit> = std::sync::OnceLock::new();
+        *MODE.get_or_init(|| {
+            let raw = std::env::var("AURORA_WG_ZERO_INIT").ok();
+            match ZeroInit::parse(raw.as_deref()) {
+                Some(ZeroInit::Explicit) => {
+                    log::info!("contact shadows: workgroup memory zeroed by the shader (AURORA_WG_ZERO_INIT=explicit)");
+                    ZeroInit::Explicit
+                }
+                Some(mode) => mode,
+                None => {
+                    log::warn!(
+                        "contact shadows: AURORA_WG_ZERO_INIT={:?} unknown, using default",
+                        raw.unwrap_or_default()
+                    );
+                    ZeroInit::Default
+                }
+            }
+        })
+    }
+
+    pub(crate) fn options(self) -> wgpu::PipelineCompilationOptions<'static> {
+        wgpu::PipelineCompilationOptions {
+            zero_initialize_workgroup_memory: self == ZeroInit::Default,
+            ..Default::default()
+        }
+    }
+
+    /// `src` with its zeroing of `any_live` when the shader does it.
+    pub(crate) fn source(self, src: String) -> String {
+        if self == ZeroInit::Default || !src.contains("var<workgroup> any_live: atomic<u32>;") {
+            return src;
+        }
+        let src = src.replace("\r\n", "\n");
+        let entry = "fn main(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_index) tid: u32) {\n";
+        assert_eq!(src.matches(entry).count(), 1, "contact shadows: the raymarch entry point");
+        src.replacen(
+            entry,
+            &format!("{entry}    if (tid == 0u) {{\n        atomicStore(&any_live, 0u);\n    }}\n    workgroupBarrier();\n"),
+            1,
+        )
+    }
+}
+
+/// The report's words (`effects`) of the contact-shadow and GTAO comparisons
+/// running: `diag-cs-off`, `diag-cs-<variant>`, `diag-wg-explicit`,
+/// `diag-ao-<method>`, and `diag-unknown` when one of their variables holds
+/// a value the viewer does not know (the default then runs).
+pub fn diagnostic_words() -> Vec<&'static str> {
+    let mut words = Vec::new();
+    let env = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+    let mut unknown = false;
+    let cs = env("AURORA_CONTACT_SHADOWS");
+    match Override::from_env() {
+        Override::None => unknown |= cs.is_some(),
+        Override::Off => words.push("diag-cs-off"),
+        Override::On => words.push("diag-cs-on"),
+        Override::Alternate => words.push("diag-cs-alt"),
+        Override::Prepass => words.push("diag-cs-prepass"),
+        Override::Shell => words.push("diag-cs-shell"),
+    }
+    let variant = Variant::from_env();
+    words.extend(variant.word());
+    unknown |= env("AURORA_CONTACT_VARIANT").is_some_and(|raw| !Variant::known(&raw));
+    match env("AURORA_WG_ZERO_INIT").as_deref().map(|raw| ZeroInit::parse(Some(raw))) {
+        Some(Some(ZeroInit::Explicit)) => words.push("diag-wg-explicit"),
+        Some(None) => unknown = true,
+        _ => {}
+    }
+    match crate::gtao::Override::from_env() {
+        crate::gtao::Override::None => unknown |= env("AURORA_AO").is_some(),
+        crate::gtao::Override::Legacy => words.push("diag-ao-legacy"),
+        crate::gtao::Override::Gtao(_) => words.push("diag-ao-gtao"),
+        crate::gtao::Override::Alternate(_) => words.push("diag-ao-alt"),
+    }
+    if unknown {
+        words.push("diag-unknown");
+    }
+    words
+}
+
+/// The final store of the raymarch, which `no-store` and `atomic-claim`
+/// rewrite.
+const FINAL_STORE: &str = "    let size = vec2<i32>(textureDimensions(out_tex));\n    if (all(write_xy >= vec2<i32>(0)) && all(write_xy < size)) {\n        textureStore(out_tex, write_xy, vec4<f32>(1.0 - result, 0.0, 0.0, 0.0));\n    }\n";
 
 /// The window's shader for `variant`: Bend's as it is, or without one of
 /// its constructs. Each rewrite panics when its text is not found, so a
@@ -422,6 +563,44 @@ pub(crate) fn variant_source(variant: Variant) -> String {
             assert_eq!(reads, 3, "contact shadows variant: the shared reads");
             src = src.replace("depth_data[sample_index + i]", "stored_depth(wave, sample_index + i)");
             src.push_str(&include_str!("shaders/contact_shadows_no_shared.wgsl").replace("\r\n", "\n"));
+            src
+        }
+        Variant::NoStore => {
+            let mut src = lf();
+            assert_eq!(src.matches(FINAL_STORE).count(), 1, "contact shadows variant: the final store");
+            // a shadow value is 0 to 1: the test keeps `result` (and the
+            // raymarch behind it) alive without a store ever running
+            src = src.replacen(
+                FINAL_STORE,
+                "    let size = vec2<i32>(textureDimensions(out_tex));\n    if (result < -1.0 && all(write_xy >= vec2<i32>(0)) && all(write_xy < size)) {\n        textureStore(out_tex, write_xy, vec4<f32>(1.0 - result, 0.0, 0.0, 0.0));\n    }\n",
+                1,
+            );
+            src
+        }
+        Variant::AtomicClaim => {
+            let mut src = lf();
+            let output = "@group(0) @binding(2) var out_tex: texture_storage_2d<rgba8unorm, write>;\n";
+            assert_eq!(src.matches(output).count(), 1, "contact shadows variant: the output binding");
+            src = src.replacen(
+                output,
+                &format!("{output}@group(0) @binding(3) var<storage, read_write> output_claims: array<atomic<u32>>;\n"),
+                1,
+            );
+            // the clear dispatch (before the wavefronts) clears the bits too
+            let clear =
+                "    if (id.x < size.x && id.y < size.y) {\n        textureStore(out_tex, vec2<i32>(id.xy), vec4<f32>(0.0));\n    }\n";
+            assert_eq!(src.matches(clear).count(), 1, "contact shadows variant: the clear");
+            src = src.replacen(
+                clear,
+                "    if (id.x < size.x && id.y < size.y) {\n        let pixel = id.y * size.x + id.x;\n        if (pixel % 32u == 0u) {\n            atomicStore(&output_claims[pixel / 32u], 0u);\n        }\n        textureStore(out_tex, vec2<i32>(id.xy), vec4<f32>(0.0));\n    }\n",
+                1,
+            );
+            assert_eq!(src.matches(FINAL_STORE).count(), 1, "contact shadows variant: the final store");
+            src = src.replacen(
+                FINAL_STORE,
+                "    let size = vec2<i32>(textureDimensions(out_tex));\n    if (all(write_xy >= vec2<i32>(0)) && all(write_xy < size)) {\n        let pixel = u32(write_xy.y * size.x + write_xy.x);\n        let bit = 1u << (pixel % 32u);\n        if ((atomicOr(&output_claims[pixel / 32u], bit) & bit) == 0u) {\n            textureStore(out_tex, write_xy, vec4<f32>(1.0 - result, 0.0, 0.0, 0.0));\n        }\n    }\n",
+                1,
+            );
             src
         }
     }
@@ -462,6 +641,8 @@ pub(crate) struct ContactShadows {
     filter: Filter,
     /// `AURORA_CONTACT_VARIANT`: `Skip` dispatches no wavefront.
     variant: Variant,
+    /// How the pipelines zero their workgroup memory (`AURORA_WG_ZERO_INIT`).
+    zero: ZeroInit,
 }
 
 /// The softening of the mask before the shading reads it
@@ -473,7 +654,7 @@ struct Filter {
 }
 
 impl Filter {
-    fn new(device: &wgpu::Device) -> Self {
+    fn new(device: &wgpu::Device, zero: ZeroInit) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("contact shadows filter"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/contact_shadows_filter.wgsl").into()),
@@ -516,7 +697,7 @@ impl Filter {
                 layout: Some(&pl),
                 module: &module,
                 entry_point: Some(entry),
-                compilation_options: Default::default(),
+                compilation_options: zero.options(),
                 cache: None,
             })
         };
@@ -576,9 +757,14 @@ impl ContactShadows {
 
     /// [`Self::new`] with the window's shader of `variant`.
     pub(crate) fn with_variant(device: &wgpu::Device, variant: Variant) -> Self {
+        Self::with_modes(device, variant, ZeroInit::from_env())
+    }
+
+    /// [`Self::with_variant`] with the workgroup memory zeroed as `zero` says.
+    pub(crate) fn with_modes(device: &wgpu::Device, variant: Variant, zero: ZeroInit) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("contact shadows"),
-            source: wgpu::ShaderSource::Wgsl(variant_source(variant).into()),
+            source: wgpu::ShaderSource::Wgsl(zero.source(variant_source(variant)).into()),
         });
         let stride = std::mem::size_of::<ParamsU>().next_multiple_of(device.limits().min_uniform_buffer_offset_alignment as usize) as u64;
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -614,7 +800,21 @@ impl ContactShadows {
                     },
                     count: None,
                 },
-            ],
+            ]
+            .into_iter()
+            // the claim bits of `atomic-claim` only: every other variant
+            // keeps the release's layout
+            .chain((variant == Variant::AtomicClaim).then_some(wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }))
+            .collect::<Vec<_>>(),
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("contact shadows"),
@@ -627,12 +827,12 @@ impl ContactShadows {
                 layout: Some(&pl),
                 module: &module,
                 entry_point: Some(entry),
-                compilation_options: Default::default(),
+                compilation_options: zero.options(),
                 cache: None,
             })
         };
         let (pipeline, clear) = (make("main"), make("clear"));
-        let filter = Filter::new(device);
+        let filter = Filter::new(device, zero);
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("contact shadows params"),
             size: stride * 8,
@@ -651,6 +851,7 @@ impl ContactShadows {
             list: DispatchList::default(),
             filter,
             variant,
+            zero,
         }
     }
 
@@ -666,14 +867,14 @@ impl ContactShadows {
         let (count, hard) = self.samples;
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("contact shadows (photo)"),
-            source: wgpu::ShaderSource::Wgsl(shader_source(count, hard).into()),
+            source: wgpu::ShaderSource::Wgsl(self.zero.source(shader_source(count, hard)).into()),
         });
         let pipeline = device.create_compute_pipeline_cached(&wgpu::ComputePipelineDescriptor {
             label: Some("contact shadows (photo)"),
             layout: Some(&self.pipeline_layout),
             module: &module,
             entry_point: Some("main"),
-            compilation_options: Default::default(),
+            compilation_options: self.zero.options(),
             cache: None,
         });
         log::info!("contact shadows: {count} samples per pixel for the photo");
@@ -727,6 +928,15 @@ impl ContactShadows {
             view_formats: &[],
         });
         let own_depth = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // `atomic-claim`'s bit per pixel (cleared by the clear dispatch)
+        let claims = (self.variant == Variant::AtomicClaim).then(|| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("contact shadows claims"),
+                size: (u64::from(size.0) * u64::from(size.1)).div_ceil(32) * 4,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            })
+        });
         let group = |depth: &wgpu::TextureView| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("contact shadows"),
@@ -748,7 +958,13 @@ impl ContactShadows {
                         binding: 2,
                         resource: wgpu::BindingResource::TextureView(&raw),
                     },
-                ],
+                ]
+                .into_iter()
+                .chain(claims.as_ref().map(|claims| wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: claims.as_entire_binding(),
+                }))
+                .collect::<Vec<_>>(),
             })
         };
         let filter_group = |depth: &wgpu::TextureView| {
@@ -811,8 +1027,11 @@ impl ContactShadows {
     }
 
     /// The dispatches of `write`, after the depth prepass (`more`: after
-    /// the blended faces and the cards were drawn into `depth`). No barrier is
-    /// needed between them: each writes its own pixels. The target is
+    /// the blended faces and the cards were drawn into `depth`). wgpu puts a
+    /// barrier between the dispatches. Inside one dispatch, the wavefronts
+    /// of neighbouring workgroups can write the same pixel where their rays
+    /// meet (unordered: whichever lands last; `atomic-claim` keeps the
+    /// first, issue #3000). The target is
     /// emptied first (0, lit): the pixel under the light's point, which no
     /// wavefront writes, and the sky stay lit. Then the filter softens the
     /// mask into `result`, over the same depth.
@@ -1055,6 +1274,59 @@ mod tests {
         assert_eq!(Variant::parse(Some(" No-Shared ")), Variant::NoShared);
         assert_eq!(Variant::parse(Some("short")), Variant::Short);
         assert_eq!(Variant::parse(Some("SKIP")), Variant::Skip);
+        assert_eq!(Variant::parse(Some("no-store")), Variant::NoStore);
+        assert_eq!(Variant::parse(Some(" Atomic-Claim")), Variant::AtomicClaim);
+        assert!(Variant::known("") && Variant::known("bend") && Variant::known("atomic-claim"));
+        assert!(!Variant::known("whatever"));
+    }
+
+    #[test]
+    fn the_zero_init_mode_comes_from_its_name() {
+        assert_eq!(ZeroInit::parse(None), Some(ZeroInit::Default));
+        assert_eq!(ZeroInit::parse(Some("native")), Some(ZeroInit::Default));
+        assert_eq!(ZeroInit::parse(Some(" Explicit ")), Some(ZeroInit::Explicit));
+        assert_eq!(ZeroInit::parse(Some("polyfill")), Some(ZeroInit::Explicit));
+        assert_eq!(ZeroInit::parse(Some("off")), None);
+        assert!(ZeroInit::Default.options().zero_initialize_workgroup_memory);
+        assert!(!ZeroInit::Explicit.options().zero_initialize_workgroup_memory);
+    }
+
+    /// With `explicit`, the shader zeroes `any_live` before any invocation
+    /// sets it; nothing else changes, and a variant without it is left as
+    /// it is.
+    #[test]
+    fn explicit_zero_init_zeroes_the_flag_first() {
+        let bend = variant_source(Variant::Bend).replace("\r\n", "\n");
+        assert_eq!(ZeroInit::Default.source(bend.clone()), bend);
+        let explicit = ZeroInit::Explicit.source(bend.clone());
+        let zero = explicit.find("atomicStore(&any_live, 0u);").expect("the zeroing");
+        let barrier = zero + explicit[zero..].find("workgroupBarrier();").unwrap();
+        assert!(barrier < explicit.find("atomicOr(&any_live, 1u);").unwrap());
+        let zeroing = "    if (tid == 0u) {\n        atomicStore(&any_live, 0u);\n    }\n    workgroupBarrier();\n";
+        assert_eq!(explicit.replacen(zeroing, "", 1), bend);
+        let no_shared = variant_source(Variant::NoShared);
+        assert_eq!(ZeroInit::Explicit.source(no_shared.clone()), no_shared);
+        // the photo's shader has the flag too
+        assert!(
+            ZeroInit::Explicit
+                .source(shader_source(192, 13))
+                .contains("atomicStore(&any_live, 0u);")
+        );
+    }
+
+    /// `no-store` keeps the store behind a test no value passes; `atomic-claim`
+    /// stores only through the claim bit, and clears the bits with the mask.
+    #[test]
+    fn the_store_variants_change_the_store_only() {
+        let bend = variant_source(Variant::Bend).replace("\r\n", "\n");
+        let no_store = variant_source(Variant::NoStore);
+        assert!(no_store.contains("if (result < -1.0 && all(write_xy >= vec2<i32>(0))"));
+        assert_eq!(no_store.matches("textureStore(").count(), bend.matches("textureStore(").count());
+        let claim = variant_source(Variant::AtomicClaim);
+        assert!(claim.contains("@group(0) @binding(3) var<storage, read_write> output_claims"));
+        assert!(claim.contains("if ((atomicOr(&output_claims[pixel / 32u], bit) & bit) == 0u) {"));
+        assert!(claim.contains("atomicStore(&output_claims[pixel / 32u], 0u);"));
+        assert!(!bend.contains("output_claims"));
     }
 
     /// Each variant drops what it says and only that (the shaders' own
@@ -1170,8 +1442,8 @@ mod tests {
         queue.submit([encoder.finish()]);
         // the sun ahead and high, its point on screen above the image
         let light = [0.2, 1.6, 0.0, 0.8];
-        let mask = |variant: Variant| -> Vec<u8> {
-            let mut cs = ContactShadows::with_variant(&device, variant);
+        let mask_with = |variant: Variant, zero: ZeroInit| -> Vec<u8> {
+            let mut cs = ContactShadows::with_modes(&device, variant, zero);
             let t = cs.targets(&device, &depth_view, format, w, h);
             cs.write(&device, &queue, &t, light, 0.1, 1.0);
             let mut encoder = device.create_command_encoder(&Default::default());
@@ -1207,11 +1479,13 @@ mod tests {
                 .flat_map(|r| r[..(w * 4) as usize].chunks(4).map(|p| p[0]))
                 .collect()
         };
+        let mask = |variant: Variant| mask_with(variant, ZeroInit::Default);
         let bend = mask(Variant::Bend);
         let shadowed = bend.iter().filter(|&&v| v > 128).count();
         assert!(shadowed > 50 && shadowed < bend.len() / 2, "a shadow to compare: {shadowed} pixels");
-        // the pixels two wavefronts write (where Bend's dispatches meet) take
-        // whichever lands last: only the others are compared
+        // the pixels two wavefronts write (neighbouring workgroups of one
+        // dispatch, where their rays meet) take whichever lands last: only
+        // the others are compared
         let mut writes = vec![0u8; (w * h) as usize];
         let list = build_dispatch_list(light, [w as i32, h as i32], [0, 0], [w as i32, h as i32], WAVE_SIZE);
         written_pixels(&list, WAVE_SIZE, |x, y| {
@@ -1221,6 +1495,8 @@ mod tests {
         });
         let once = writes.iter().filter(|&&n| n == 1).count();
         assert!(once > writes.len() * 3 / 4, "{once} pixels written once");
+        // the race `atomic-claim` takes out is real in this scene
+        assert!(writes.iter().any(|&n| n > 1), "pixels with more than one writer");
         let differ = |other: &[u8]| -> Vec<(usize, u8, u8)> {
             bend.iter()
                 .zip(other)
@@ -1236,10 +1512,21 @@ mod tests {
             again.len(),
             &again[..again.len().min(8)]
         );
-        for variant in [Variant::NoEarlyOut, Variant::NoShared] {
+        for variant in [Variant::NoEarlyOut, Variant::NoShared, Variant::AtomicClaim] {
             let d = differ(&mask(variant));
             assert!(d.is_empty(), "{variant:?}: {} pixels differ, {:?}", d.len(), &d[..d.len().min(8)]);
         }
+        // the shader's own zeroing gives the same mask
+        for variant in [Variant::Bend, Variant::NoEarlyOut, Variant::AtomicClaim] {
+            let d = differ(&mask_with(variant, ZeroInit::Explicit));
+            assert!(
+                d.is_empty(),
+                "{variant:?} explicit: {} pixels differ, {:?}",
+                d.len(),
+                &d[..d.len().min(8)]
+            );
+        }
         assert!(mask(Variant::Skip).iter().all(|&v| v == 0), "skip: nothing");
+        assert!(mask(Variant::NoStore).iter().all(|&v| v == 0), "no-store: nothing");
     }
 }

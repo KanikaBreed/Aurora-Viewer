@@ -136,6 +136,23 @@ pub const EFFECT_WORDS: &[&str] = &[
     "hdr",
     "photo",
     "vr",
+    // aurora_render::diagnostic_words: the variables of a GPU-loss test
+    "diag-cs-off",
+    "diag-cs-on",
+    "diag-cs-alt",
+    "diag-cs-prepass",
+    "diag-cs-shell",
+    "diag-cs-no-early-out",
+    "diag-cs-no-shared",
+    "diag-cs-short",
+    "diag-cs-skip",
+    "diag-cs-no-store",
+    "diag-cs-atomic-claim",
+    "diag-wg-explicit",
+    "diag-ao-legacy",
+    "diag-ao-gtao",
+    "diag-ao-alt",
+    "diag-unknown",
 ];
 
 /// The names `window_state` takes.

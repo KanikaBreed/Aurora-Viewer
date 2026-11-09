@@ -5289,7 +5289,7 @@ before (`amis`, `groupes`, `repere`, `historique`…) are still accepted.
 | `AURORA_DEMO_LOGIN_FAVORITES=1\|open\|pick` | Stored favorite landmarks in the demo accounts' start menus |
 | `AURORA_DEMO_LOGIN_WAIT=logout\|sudden\|refused` | A previous session of the demo account still on the grid: the login's countdown |
 | `AURORA_NEWS_URL=<url>` | Login news read from somewhere other than `main` |
-| `AURORA_DEMO_CRASH=<mode>` | Offline crash and recovery window, a frozen viewer ended from outside, out of memory, stack overflow or a critical thread's death |
+| `AURORA_DEMO_CRASH=<mode>` | Offline crash and recovery window, a frozen viewer ended from outside (its watchdog stopped too with `freeze-silent`), out of memory, stack overflow or a critical thread's death |
 | `AURORA_DEMO_CRASH_DIR=<folder>` | Isolates the crash reports of offline tests |
 | `AURORA_DEMO_CRASH_SEND=<options>` | Crash report sending with a simulated GitHub |
 | `AURORA_CRASH_CAPTURE=<file.png>` | Screenshot of the recovery window in demo |
@@ -7224,7 +7224,7 @@ failure. Grid validation and any paid upload are performed by the human.
   proportions (the 2D font's images are wider than tall), and the same
   colour emojis, same size, in the input field and in the sent line.
   `AURORA_EMOJI_FONT=<file>` compares two fonts.
-- **`AURORA_DEMO_CRASH=panic|native|missing|normal|recovery|freeze|oom|overflow|thread`**, only
+- **`AURORA_DEMO_CRASH=panic|native|missing|normal|recovery|freeze|freeze-silent|oom|overflow|thread`**, only
   with `AURORA_DEMO`: triggers a Rust panic, a native exception
   (SIGSEGV on Linux), an abnormal exit without a trace, a normal close or
   an exit without a watcher. The `recovery` mode makes it possible to check the
@@ -7239,7 +7239,14 @@ failure. Grid validation and any paid upload are performed by the human.
   holds `| Crash | Freeze |`, `| Window | not answering for the last … s |`,
   the main and render threads' stacks and the "Last state" table (on Linux
   too: there the window is taken for frozen when the main loop makes no
-  pass for 5 s). `oom`
+  pass for 5 s). `freeze-silent` (Windows) freezes the main thread and stops
+  the viewer's watchdog with it, so no stack is taken, and ends the process
+  after 20 s with `0xCFFFFFFF`, the code Windows gives a window closed from
+  its "Not responding" prompt: the watcher, which looks at the window from
+  outside the viewer once a second, leaves `watcher-hung.txt`, and the
+  report says `| Crash | Freeze |`, the exit code named "ended by Windows as
+  not responding" and `| Window | not answering for the last … s (seen from
+  outside the viewer) |`. `oom`
   asks for 64 TB at start: the allocator's failure path writes `oom.txt`
   and the process fails fast (`0xC0000409`); the report says
   `| Crash | Out of memory (70368744177664 bytes) |` with the allocation's

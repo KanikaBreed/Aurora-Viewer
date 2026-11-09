@@ -17,7 +17,7 @@ mod platform {
         Memory::{MEMORY_BASIC_INFORMATION, VirtualQuery},
     };
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, FILETIME, HANDLE, HWND, LPARAM, LRESULT, WAIT_OBJECT_0, WPARAM},
+        Foundation::{CloseHandle, FILETIME, HANDLE, HWND, LPARAM, LRESULT, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM},
         System::{
             Diagnostics::Debug::{
                 AddVectoredExceptionHandler, EXCEPTION_CONTINUE_SEARCH, EXCEPTION_EXECUTE_HANDLER, EXCEPTION_POINTERS,
@@ -145,9 +145,23 @@ mod platform {
             if window.is_null() {
                 return WaitForSingleObject(process.0, INFINITE) == WAIT_OBJECT_0;
             }
+            // once a second, the viewer's window seen from outside: a
+            // freeze that stopped the viewer's own watchdog too is still
+            // recorded (#3099, #3102, #3113)
+            let mut view = super::super::watchdog::OutsideView::default();
+            let mut recorded = false;
             loop {
-                match MsgWaitForMultipleObjects(1, &process.0, 0, INFINITE, QS_ALLINPUT) {
+                match MsgWaitForMultipleObjects(1, &process.0, 0, 1000, QS_ALLINPUT) {
                     WAIT_OBJECT_0 => return true,
+                    WAIT_TIMEOUT => {
+                        let window = super::super::read_limited(&dir.join(super::super::WINDOW_FILE), 32)
+                            .ok()
+                            .and_then(|text| text.trim().parse::<usize>().ok());
+                        if let Some(window) = window {
+                            let seconds = view.look(window_hung(window), std::time::Instant::now());
+                            super::super::watchdog::record_outside(dir, seconds, &mut recorded);
+                        }
+                    }
                     r if r == WAIT_OBJECT_0 + 1 => {
                         let mut msg: MSG = std::mem::zeroed();
                         while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {

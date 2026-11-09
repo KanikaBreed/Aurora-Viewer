@@ -35,6 +35,15 @@ pub const HUNG_AFTER: u64 = 5;
 const THREADS: &[&str] = &["aurora-render"];
 
 static WINDOW: AtomicUsize = AtomicUsize::new(0);
+/// `AURORA_DEMO_CRASH=freeze-silent`: the watchdog stops taking looks.
+static SILENCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The demo's silent freeze (`crash::demo_freeze`): the watchdog stops too.
+pub fn silence() {
+    SILENCED.store(true, Ordering::SeqCst);
+}
+/// The session folder, for `watch_window` to tell the watcher the window.
+static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 /// Linux: the main loop's last pass, in milliseconds since [`EPOCH`].
 #[cfg(target_os = "linux")]
 static PUMPED: AtomicU64 = AtomicU64::new(0);
@@ -213,6 +222,47 @@ impl State {
     }
 }
 
+/// The watcher's view of the viewer's window, one look a second from
+/// outside the viewer (`native::watch`): the seconds to record while it is
+/// hung (counting the `HUNG_AFTER` Windows waits before it calls a window
+/// hung), none once it answers. Pure, so that it is tested everywhere.
+#[cfg(any(windows, test))]
+#[derive(Debug, Default)]
+pub(super) struct OutsideView {
+    hung_since: Option<Instant>,
+}
+
+#[cfg(any(windows, test))]
+impl OutsideView {
+    pub(super) fn look(&mut self, hung: bool, now: Instant) -> Option<u64> {
+        if !hung {
+            self.hung_since = None;
+            return None;
+        }
+        let since = *self.hung_since.get_or_insert(now);
+        Some(now.saturating_duration_since(since).as_secs() + HUNG_AFTER)
+    }
+}
+
+/// The watcher's record of the hung window (`WATCHER_HUNG`), kept current
+/// each second while it lasts and removed when the window answers again.
+#[cfg(any(windows, test))]
+pub(super) fn record_outside(dir: &Path, seconds: Option<u64>, recorded: &mut bool) {
+    match seconds {
+        Some(seconds) => {
+            let pending = dir.join("watcher-hung.pending");
+            if std::fs::write(&pending, seconds.to_string()).is_ok() {
+                *recorded = std::fs::rename(pending, dir.join(super::WATCHER_HUNG)).is_ok();
+            }
+        }
+        None if *recorded => {
+            let _ = std::fs::remove_file(dir.join(super::WATCHER_HUNG));
+            *recorded = false;
+        }
+        None => {}
+    }
+}
+
 /// The app's latest state, kept for the next `alive.txt`.
 pub fn note(state: State) {
     if let Ok(mut kept) = STATE.try_lock() {
@@ -228,7 +278,13 @@ pub fn watch_window(window: &winit::window::Window) {
         if let Ok(handle) = window.window_handle()
             && let RawWindowHandle::Win32(handle) = handle.as_raw()
         {
-            WINDOW.store(handle.hwnd.get() as usize, Ordering::Relaxed);
+            let hwnd = handle.hwnd.get() as usize;
+            WINDOW.store(hwnd, Ordering::Relaxed);
+            // the watcher looks at it from outside: it still sees the window
+            // hung when this process, its watchdog included, stopped
+            if let Some(dir) = DIR.get() {
+                let _ = std::fs::write(dir.join(super::WINDOW_FILE), hwnd.to_string());
+            }
         }
     }
     #[cfg(target_os = "linux")]
@@ -268,6 +324,7 @@ fn window_hung(_window: usize) -> bool {
 
 /// Started from the main thread, whose handle it keeps.
 pub fn start(dir: &Path) {
+    let _ = DIR.set(dir.to_owned());
     #[cfg(any(windows, target_os = "linux"))]
     {
         let main = super::native::Thread::current();
@@ -295,6 +352,9 @@ fn run(dir: &Path, main: Option<&super::native::Thread>) {
     let mut written: Option<Instant> = None;
     loop {
         std::thread::sleep(TICK);
+        if SILENCED.load(Ordering::Relaxed) {
+            continue;
+        }
         let window = WINDOW.load(Ordering::Relaxed);
         if window != 0 {
             if window_hung(window) {
@@ -464,4 +524,41 @@ pub fn alive_written(dir: &Path) -> Option<u64> {
         .filter_map(|at| at.duration_since(UNIX_EPOCH).ok())
         .map(|at| at.as_secs())
         .max()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_watcher_counts_a_hung_window_from_outside_and_forgets_it_once_it_answers() {
+        let t0 = Instant::now();
+        let mut view = OutsideView::default();
+        assert_eq!(view.look(false, t0), None);
+        // Windows calls a window hung after HUNG_AFTER s without a message
+        assert_eq!(view.look(true, t0), Some(HUNG_AFTER));
+        assert_eq!(view.look(true, t0 + Duration::from_secs(30)), Some(HUNG_AFTER + 30));
+        assert_eq!(view.look(false, t0 + Duration::from_secs(31)), None);
+        // a later freeze counts from its own start
+        assert_eq!(view.look(true, t0 + Duration::from_secs(40)), Some(HUNG_AFTER));
+    }
+
+    #[test]
+    fn the_watchers_record_follows_the_window_and_leaves_its_last_count() {
+        let dir = std::env::temp_dir().join(format!("aurora-watcher-hung-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let file = dir.join(super::super::WATCHER_HUNG);
+        let mut recorded = false;
+        record_outside(&dir, Some(7), &mut recorded);
+        record_outside(&dir, Some(9), &mut recorded);
+        assert!(recorded);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "9");
+        // it answered again: no freeze to report
+        record_outside(&dir, None, &mut recorded);
+        assert!(!file.exists() && !recorded);
+        // hung when the viewer ended: the last count stays for the report
+        record_outside(&dir, Some(12), &mut recorded);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "12");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

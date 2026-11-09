@@ -48,6 +48,12 @@ fn build_at(record: &super::Record, dir: &Path, boot_unix: Option<u64>) -> Summa
     // A failed allocation counts only when the process then failed fast (or
     // nobody saw how it ended): one that was handled leaves a note too.
     let oom = out_of_memory(&text("oom.txt")).filter(|_| matches!(exit_code, None | Some(FAST_FAIL)));
+    // The watcher process saw the window hung, from outside the viewer, for
+    // that many seconds when the session ended (`native::watch`): it still
+    // sees a freeze that stopped the viewer's own watchdog too.
+    let watcher_hung = super::read_limited(&dir.join(super::WATCHER_HUNG), 32)
+        .ok()
+        .and_then(|seconds| seconds.trim().parse::<u64>().ok());
     let (reason, title_reason) = if !panic.trim().is_empty() {
         ("Rust panic".to_owned(), "Rust panic".to_owned())
     } else if let Some((size, _)) = &oom {
@@ -78,8 +84,11 @@ fn build_at(record: &super::Record, dir: &Path, boot_unix: Option<u64>) -> Summa
         // The GPU still had a frame when the session ended (the window
         // answered, the user closed it from the notice or by other means).
         ("GPU not responding".to_owned(), "GPU not responding".to_owned())
-    } else if !freeze.is_empty() {
-        // The window was still not answering when the session ended.
+    } else if !freeze.is_empty() || watcher_hung.is_some() || exit_code == Some(APPLICATION_HANG) {
+        // The window was still not answering when the session ended: the
+        // watchdog's stacks, the watcher's view from outside the viewer, or
+        // Windows' own word (it closed the viewer as not responding). The
+        // same "Freeze" for all three: the crash triage groups by it.
         ("Freeze".to_owned(), "freeze".to_owned())
     } else {
         ("Unexpected shutdown".to_owned(), "unexpected shutdown".to_owned())
@@ -123,14 +132,14 @@ fn build_at(record: &super::Record, dir: &Path, boot_unix: Option<u64>) -> Summa
     // `freeze.txt` is the watchdog's word that the window was frozen at the
     // end; it answers for 5 s more than its last `responsive`, itself up to
     // 5 s older than the end of the session.
-    if let (Some(end), Some(_)) = (end, tick) {
+    if let (Some(end), Some(tick)) = (end, tick) {
         let window = match number("responsive") {
             Some(at) if !freeze.is_empty() => format!(
                 "not answering for the last {} s",
                 end.saturating_sub(at) + super::watchdog::HUNG_AFTER
             ),
-            Some(_) => "answering until the end".to_owned(),
             None => "never shown".to_owned(),
+            Some(_) => window_at_end(watcher_hung, stopped.map(|stopped| stopped.saturating_sub(tick)), exit_code),
         };
         rows.push(("Window", window));
     }
@@ -888,9 +897,35 @@ fn native_signal(line: &str) -> Option<(u8, &'static str)> {
     Some((number.parse().ok()?, name))
 }
 
+/// STATUS_APPLICATION_HANG: Windows ended the viewer as not responding
+/// (its "Close the program" prompt, or End task on a hung window).
+const APPLICATION_HANG: u32 = 0xCFFF_FFFF;
+
+/// The watchdog writes `alive.txt` every 5 s: silent longer than this
+/// before the watcher saw the end, it had stopped with the viewer.
+const SILENT_AFTER: u64 = 15;
+
+/// The window row when the viewer's watchdog left no freeze of its own: what
+/// the watcher saw from outside, the watchdog's own silence before the end
+/// (`silent`, seconds between its last note and the end), then Windows' exit
+/// code. Three reports of one tester (#3099, #3102, #3113) said "answering
+/// until the end" while Windows had shown "Not responding".
+fn window_at_end(watcher_hung: Option<u64>, silent: Option<u64>, exit_code: Option<u32>) -> String {
+    if let Some(seconds) = watcher_hung {
+        format!("not answering for the last {seconds} s (seen from outside the viewer)")
+    } else if let Some(seconds) = silent.filter(|s| *s > SILENT_AFTER) {
+        format!("no sign of life for the last {seconds} s (its watchdog stopped too)")
+    } else if exit_code == Some(APPLICATION_HANG) {
+        "not answering at the end (Windows closed it as not responding)".to_owned()
+    } else {
+        "answering until the end".to_owned()
+    }
+}
+
 /// The usual meaning of an exit code, for the reader of the report.
 fn exit_code_name(code: u32) -> Option<&'static str> {
     Some(match code {
+        APPLICATION_HANG => "ended by Windows as not responding: Close the program, or End task",
         0x0000_0001 => "ended from outside, as by Task Manager, or exit(1)",
         0x4001_0004 => "ended by a debugger or the end of the Windows session",
         0xC000_0005 => "access violation",
@@ -1733,6 +1768,46 @@ mod tests {
         for private in ["Private", "secret", "region_name", "someone", "layers_note", "OLD_NOTE"] {
             assert!(!body.contains(private), "leaked {private}:\n{body}");
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_session_windows_closed_as_not_responding_is_a_freeze() {
+        // #3099, #3102, #3113: frozen at login, closed from Windows' "Not
+        // responding" prompt; the watchdog left no freeze of its own.
+        let (dir, record) = session();
+        std::fs::write(dir.join("alive.txt"), "tick=1500\nresponsive=1499\n").unwrap();
+        std::fs::write(dir.join("stopped-unix.txt"), "1503").unwrap();
+        std::fs::write(dir.join("exit-code.txt"), "0xCFFFFFFF").unwrap();
+        let summary = build_at(&record, &dir, Some(10));
+        let body = &summary.body;
+        assert_eq!(summary.title, "Crash: freeze (0.7.1+3.gabcdef)");
+        assert!(body.contains("| Crash | Freeze |"), "{body}");
+        assert!(
+            body.contains("| Exit code | 0xCFFFFFFF (ended by Windows as not responding: Close the program, or End task) |"),
+            "{body}"
+        );
+        assert!(
+            body.contains("| Window | not answering at the end (Windows closed it as not responding) |"),
+            "{body}"
+        );
+        // the watchdog silent long before the end: it stopped with the viewer
+        std::fs::write(dir.join("stopped-unix.txt"), "1540").unwrap();
+        let body = build_at(&record, &dir, Some(10)).body;
+        assert!(
+            body.contains("| Window | no sign of life for the last 40 s (its watchdog stopped too) |"),
+            "{body}"
+        );
+        // the watcher saw it hung from outside: its word first
+        std::fs::write(dir.join(super::super::WATCHER_HUNG), "37\n").unwrap();
+        let body = build_at(&record, &dir, Some(10)).body;
+        assert!(
+            body.contains("| Window | not answering for the last 37 s (seen from outside the viewer) |"),
+            "{body}"
+        );
+        // and without Windows' code, the watcher's view alone is a freeze
+        std::fs::write(dir.join("exit-code.txt"), "0x00000001").unwrap();
+        assert!(build_at(&record, &dir, Some(10)).body.contains("| Crash | Freeze |"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

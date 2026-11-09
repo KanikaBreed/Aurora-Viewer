@@ -41,6 +41,7 @@ const MAX_TRACE: u64 = 256 * 1024;
 const WATCHER_HUNG: &str = "watcher-hung.txt";
 /// The viewer's window, for the watcher to look at from outside (Windows:
 /// its handle, written when it is first shown).
+#[cfg(windows)]
 const WINDOW_FILE: &str = "window.txt";
 static SESSION: OnceLock<Session> = OnceLock::new();
 

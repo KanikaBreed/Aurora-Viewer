@@ -134,6 +134,9 @@ fn build_at(record: &super::Record, dir: &Path, boot_unix: Option<u64>) -> Summa
     // 5 s older than the end of the session.
     if let (Some(end), Some(tick)) = (end, tick) {
         let window = match number("responsive") {
+            // the watcher's count is the closer one, and the only one when
+            // the stacks are its own (the watchdog stopped too)
+            _ if watcher_hung.is_some() => window_at_end(watcher_hung, None, exit_code),
             Some(at) if !freeze.is_empty() => format!(
                 "not answering for the last {} s",
                 end.saturating_sub(at) + super::watchdog::HUNG_AFTER

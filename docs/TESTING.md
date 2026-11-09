@@ -7240,13 +7240,15 @@ failure. Grid validation and any paid upload are performed by the human.
   the main and render threads' stacks and the "Last state" table (on Linux
   too: there the window is taken for frozen when the main loop makes no
   pass for 5 s). `freeze-silent` (Windows) freezes the main thread and stops
-  the viewer's watchdog with it, so no stack is taken, and ends the process
-  after 20 s with `0xCFFFFFFF`, the code Windows gives a window closed from
-  its "Not responding" prompt: the watcher, which looks at the window from
-  outside the viewer once a second, leaves `watcher-hung.txt`, and the
+  the viewer's watchdog with it, and ends the process after 20 s with
+  `0xCFFFFFFF`, the code Windows gives a window closed from its "Not
+  responding" prompt: the watcher, which looks at the window from outside
+  the viewer once a second, leaves `watcher-hung.txt` and, 3 s after Windows
+  calls the window hung with no freeze file from the watchdog, reads the
+  main and render threads' stacks itself into `freeze.txt` (x64). The
   report says `| Crash | Freeze |`, the exit code named "ended by Windows as
-  not responding" and `| Window | not answering for the last … s (seen from
-  outside the viewer) |`. `oom`
+  not responding", `| Window | not answering for the last … s (seen from
+  outside the viewer) |` and the two stacks. `oom`
   asks for 64 TB at start: the allocator's failure path writes `oom.txt`
   and the process fails fast (`0xC0000409`); the report says
   `| Crash | Out of memory (70368744177664 bytes) |` with the allocation's

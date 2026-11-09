@@ -263,6 +263,80 @@ pub(super) fn record_outside(dir: &Path, seconds: Option<u64>, recorded: &mut bo
     }
 }
 
+/// The watcher reads the stacks itself once the window has been hung this
+/// many seconds past Windows' own wait without a freeze file: the viewer's
+/// watchdog writes one within a second, so it stopped too.
+#[cfg(any(windows, test))]
+const OUTSIDE_AFTER: u64 = 3;
+
+/// What the watcher does with the stacks at one look.
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq)]
+pub(super) enum OutsideStep {
+    Wait,
+    /// Read them, into `freeze.txt`.
+    Take,
+    /// The window answers again: the freeze the watcher wrote is over.
+    Remove,
+}
+
+/// The watcher's own reading of a freeze's stacks, for the freezes that
+/// stop the viewer's watchdog too (#3099, #3102, #3113): taken again every
+/// [`RECAPTURE`] while it lasts, as the watchdog does, and never over the
+/// watchdog's own file.
+#[cfg(any(windows, test))]
+#[derive(Debug, Default)]
+pub(super) struct OutsideStacks {
+    taken: Option<Instant>,
+}
+
+#[cfg(any(windows, test))]
+impl OutsideStacks {
+    /// The step for a look: hung for `seconds` (None while it answers),
+    /// with a freeze file in the session folder or not.
+    pub(super) fn step(&mut self, seconds: Option<u64>, freeze_file: bool, now: Instant) -> OutsideStep {
+        let Some(seconds) = seconds else {
+            return if self.taken.take().is_some() {
+                OutsideStep::Remove
+            } else {
+                OutsideStep::Wait
+            };
+        };
+        let due = match self.taken {
+            _ if seconds < HUNG_AFTER + OUTSIDE_AFTER => false,
+            None => !freeze_file,
+            Some(at) => now.saturating_duration_since(at) >= RECAPTURE,
+        };
+        if due {
+            self.taken = Some(now);
+            OutsideStep::Take
+        } else {
+            OutsideStep::Wait
+        }
+    }
+
+    /// One look of the watcher, applied to the session folder.
+    #[cfg(windows)]
+    pub(super) fn look(&mut self, dir: &Path, pid: u32, window: usize, seconds: Option<u64>, now: Instant) {
+        match self.step(seconds, dir.join("freeze.txt").exists(), now) {
+            OutsideStep::Wait => {}
+            OutsideStep::Remove => {
+                let _ = std::fs::remove_file(dir.join("freeze.txt"));
+            }
+            OutsideStep::Take => {
+                let seconds = seconds.unwrap_or(HUNG_AFTER);
+                let mut out = format!("Freeze: no answer for {seconds} s (seen from outside the viewer)\n").into_bytes();
+                #[cfg(target_arch = "x86_64")]
+                if super::native::write_outside_stacks(&mut out, pid, window, THREADS) {
+                    write_stacks(dir, "freeze", out);
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                let _ = (pid, window, out);
+            }
+        }
+    }
+}
+
 /// The app's latest state, kept for the next `alive.txt`.
 pub fn note(state: State) {
     if let Ok(mut kept) = STATE.try_lock() {
@@ -541,6 +615,28 @@ mod tests {
         assert_eq!(view.look(false, t0 + Duration::from_secs(31)), None);
         // a later freeze counts from its own start
         assert_eq!(view.look(true, t0 + Duration::from_secs(40)), Some(HUNG_AFTER));
+    }
+
+    #[test]
+    fn the_watcher_reads_the_stacks_only_when_the_viewers_watchdog_left_none() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut stacks = OutsideStacks::default();
+        assert_eq!(stacks.step(None, false, t0), OutsideStep::Wait);
+        // the watchdog has its second to write them first
+        assert_eq!(stacks.step(Some(HUNG_AFTER), false, at(0)), OutsideStep::Wait);
+        assert_eq!(stacks.step(Some(HUNG_AFTER + OUTSIDE_AFTER), true, at(3)), OutsideStep::Wait);
+        // it wrote none: it stopped with the viewer
+        assert_eq!(stacks.step(Some(HUNG_AFTER + OUTSIDE_AFTER), false, at(3)), OutsideStep::Take);
+        // read again while the freeze lasts, its own file there or not
+        assert_eq!(stacks.step(Some(HUNG_AFTER + 10), true, at(10)), OutsideStep::Wait);
+        assert_eq!(stacks.step(Some(HUNG_AFTER + 18), true, at(18)), OutsideStep::Take);
+        // answering again: the watcher's freeze is over
+        assert_eq!(stacks.step(None, true, at(19)), OutsideStep::Remove);
+        assert_eq!(stacks.step(None, false, at(20)), OutsideStep::Wait);
+        // a freeze the watchdog saw is left to it
+        assert_eq!(stacks.step(Some(HUNG_AFTER + 30), true, at(60)), OutsideStep::Wait);
+        assert_eq!(stacks.step(None, true, at(61)), OutsideStep::Wait);
     }
 
     #[test]

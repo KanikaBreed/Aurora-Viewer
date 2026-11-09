@@ -112,17 +112,25 @@ What each part tells the one who fixes it:
 - **Window**: answering until the end, or not answering for the last N s.
 - **GPU device lost**: the renderer's device-lost callback fired (driver
   reset, GPU removed).
-- **Risk factors**: the graphics effects, known overlay hooks, memory
-  headroom and session uptime captured before a GPU loss. This is a summary
-  of available signals, not a diagnosis. It identifies the unavailable
-  60-second memory minimum, driver age and full scene-event timeline.
+- **Risk factors** (GPU loss or stall only): what was stacked up, from
+  what the report already has: the heavy effects first (contact shadows,
+  GTAO, SSR…), video-memory headroom of 10 % or less, an overlay hook, a
+  region change in the last 60 s, then the preset, driver and session
+  length. A list, not a diagnosis: no rating comes with it, since the order
+  is a guess at weight and no crash statistics back it yet.
 - **GPU work at the loss**: the frame last submitted to the card and the
   last one it finished, each with its age at the loss, and what that says:
   a hang (the last frame not finished 0.5 s or more after its submission:
   the driver reset the card; a real hang on an RTX 5070 Ti was declared
   1.1 s after), a fault the driver found in a frame's work (the loss within
   0.1 s of the submission, or after the frame ended), or undecided between
-  the two. Frame numbers and ages only.
+  the two. Frame numbers and ages only. It describes the loss that began
+  the end of the session: the first of the last losses less than five
+  minutes apart, not a recovery's new device lost after it.
+- **GPU work at the later losses**: when the viewer recovered (or tried
+  to) and the card was lost again, each later loss in the same words,
+  numbered (`loss 2: …`). "nothing submitted yet (lost while starting)"
+  there is a recovery whose new device was lost before its first frame.
 - **GPU recoveries**: the graphics card resets the viewer recovered from
   during the session (Preferences › Graphics, on by default), how many, and for the first
   five when in the session, how long the recovery took and whether it came
@@ -191,10 +199,33 @@ What each part tells the one who fixes it:
   `gpu-device-fault-private.txt`; do not post that private artifact without
   reviewing it. The numeric public artifact is `gpu-breadcrumbs.txt`.
 - **GPU errors**: the errors wgpu reported, first of each in the order they
-  came: `out-of-memory` or the wgpu operation that failed
-  (`Queue::write_buffer`). Their messages stay in the local log.
+  came, with their count, ten at most: `out-of-memory`, with the call when
+  the log names it (`out-of-memory in Device::create_bind_group (x2)`), or
+  the wgpu operation that failed (`Queue::write_buffer (x155)`). On a GPU
+  loss with none, the row says so. Their messages stay local: in the log,
+  and up to 50 distinct ones with their labels, counts and age in
+  `gpu-errors-private.txt`.
+- **OS GPU reset records** (GPU loss or stall, or when the OS recorded
+  something): what the operating system noted of a GPU reset from two
+  minutes before to five minutes after the session's end. Linux: the kernel
+  lines of a GPU driver (`journalctl`, else `dmesg`), published as fixed
+  labels (`amdgpu timeout`, `DRM reset`). Windows: Display 4101 and
+  LiveKernelEvent 141 / 117 / 1a8, with their times. The row also says
+  whether the query worked: collected, partial (one event channel
+  unavailable), incomplete (a cap reached) or not collected and why. The
+  kernel lines, event text, TDR / HAGS / MPO registry values and WATCHDOG
+  dump names stay local; the registry values and dumps are read when the
+  report is built and may have changed since the crash. The queries share
+  one two-second budget.
+- **XR runtime**: the VR runtime of the session, as a fixed name (SteamVR,
+  Meta, Virtual Desktop, Monado, Windows Mixed Reality or other), and
+  whether it created the Vulkan device. Only shown when one was loaded.
 - **Last state**: screen, frame rate, frame time, window size, graphics
-  preset, memory, video memory used / budget, texture memory pressure,
+  preset, memory, video memory used / budget, the tightest video memory
+  headroom of the last 60 seconds (the driver's budget less what it
+  counted for the viewer, in MB, negative while the viewer was past its
+  budget: a card shared with another program, where the driver moves
+  memory out and the frames slow down together), texture memory pressure,
   objects, avatars, regions, as noted every 2 seconds, and the swapchain
   recreations of the last 10 seconds (window resizes among them), frozen
   when the graphics card is lost. It also tells the cause of a GPU loss

@@ -197,19 +197,21 @@ pub fn collect(dir: &Path, unix: Option<u64>) {
     let mut events = Vec::new();
     let mut queried = 0u8;
     let mut capped = false;
+    // The window in the query itself: WER files every kind of problem as
+    // 1001, and the newest 1000 of them alone can miss a crash some time ago.
+    let query = event_query(since, until);
     for channel in ["System", "Application"] {
         let result = output_before(
-            std::process::Command::new("wevtutil.exe").args([
+            std::process::Command::new(system_tool("wevtutil.exe")).args([
                 "qe",
                 channel,
-                "/q:*[System[(EventID=4101 or EventID=1001)]]",
+                &query,
                 "/rd:true",
                 "/f:xml",
                 // One root element around the events: without it, two or
                 // more events are not one XML document and none parse.
                 "/e:Events",
-                // Keep enough recent records to cover the recovery window
-                // even on busy systems; the parser filters to the time span.
+                // a cap all the same; the parser keeps the window too
                 "/c:1000",
             ]),
             deadline,
@@ -240,6 +242,38 @@ pub fn collect(dir: &Path, unix: Option<u64>) {
     }
     let status = windows_status(queried, events.len(), capped);
     let _ = std::fs::write(dir.join("os-gpu-events.status"), status);
+}
+
+/// The XPath of the GPU reset events between `since` and `until` (Unix
+/// seconds): Display 4101 (a driver reset, System) and Windows Error
+/// Reporting's 1001 (Application), which `parse_windows_events` narrows to
+/// its LiveKernelEvent reports.
+#[cfg(any(windows, test))]
+fn event_query(since: u64, until: u64) -> String {
+    let time = |unix: u64| {
+        chrono::DateTime::from_timestamp(unix.min(i64::MAX as u64) as i64, 0)
+            .unwrap_or_default()
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    };
+    format!(
+        "/q:*[System[(EventID=4101 or EventID=1001) and TimeCreated[@SystemTime>='{}' and @SystemTime<='{}']]]",
+        time(since),
+        time(until)
+    )
+}
+
+/// A tool of Windows' own, by its full path: a bare name is searched in the
+/// viewer's folder before System32.
+#[cfg(windows)]
+fn system_tool(name: &str) -> std::path::PathBuf {
+    windows_root().join("System32").join(name)
+}
+
+#[cfg(windows)]
+fn windows_root() -> std::path::PathBuf {
+    std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
 }
 
 #[cfg(any(windows, test))]
@@ -303,18 +337,16 @@ fn parse_windows_events(xml: &str, since: u64, until: u64) -> (Vec<String>, bool
                     return Some(format!("Display 4101 at {}", time.to_rfc3339()));
                 }
                 if id == 1001 && provider.to_ascii_lowercase().contains("error reporting") {
-                    let data = || {
-                        event
-                            .descendants()
-                            .filter(|node| node.tag_name().name() == "Data")
-                            .filter_map(|node| node.text())
-                    };
+                    let mut data = event
+                        .descendants()
+                        .filter(|node| node.tag_name().name() == "Data")
+                        .filter_map(|node| node.text());
                     // Windows Error Reporting files every kind of problem as
                     // 1001: only its LiveKernelEvent reports are GPU resets.
-                    if !data().any(|text| text.trim().eq_ignore_ascii_case("LiveKernelEvent")) {
-                        return None;
-                    }
-                    let code = data().find_map(live_kernel_code)?;
+                    // The code is P1, after the event's name: the fields
+                    // before it (the bucket) are numbers of their own.
+                    data.find(|text| text.trim().eq_ignore_ascii_case("LiveKernelEvent"))?;
+                    let code = data.find_map(live_kernel_code)?;
                     return Some(format!("LiveKernelEvent {code} at {}", time.to_rfc3339()));
                 }
                 None
@@ -329,6 +361,133 @@ fn live_kernel_code(text: &str) -> Option<&'static str> {
         "117" => Some("117"),
         "1a8" => Some("1a8"),
         _ => None,
+    }
+}
+
+#[cfg(windows)]
+fn windows_graphics_settings(deadline: Instant) -> Vec<String> {
+    let mut values = Vec::new();
+    for (key, name) in [
+        (r"HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers", "TdrDelay"),
+        (r"HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers", "TdrDdiDelay"),
+        (r"HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers", "TdrLevel"),
+        (r"HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers", "HwSchMode"),
+        (r"HKLM\SOFTWARE\Microsoft\Windows\Dwm", "OverlayTestMode"),
+    ] {
+        let output = output_before(
+            std::process::Command::new(system_tool("reg.exe")).args(["query", key, "/v", name]),
+            deadline,
+        );
+        if let Ok(output) = output
+            && output.status.success()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let value = stdout.lines().find(|line| line.contains(name)).unwrap_or("").trim();
+            if !value.is_empty() {
+                values.push(format!("{name}: {value}"));
+            }
+        }
+    }
+    values
+}
+
+#[cfg(windows)]
+fn watchdog_dumps(since: u64, until: u64) -> Vec<String> {
+    std::fs::read_dir(windows_root().join("LiveKernelReports").join("WATCHDOG"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            if !entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("dmp"))
+            {
+                return None;
+            }
+            let metadata = entry.metadata().ok()?;
+            let modified = metadata.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+            if modified < since || modified > until {
+                return None;
+            }
+            Some(format!("{} {modified}", entry.file_name().to_string_lossy()))
+        })
+        .take(60)
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn parse_journal(text: &str) -> (Vec<String>, bool) {
+    bounded_records(
+        text.lines()
+            .filter(|line| gpu_kernel_line(line))
+            .map(|line| line.chars().take(2048).collect()),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn parse_dmesg(text: &str, boot: u64, since: u64, until: u64) -> (Vec<String>, bool) {
+    bounded_records(text.lines().filter_map(|line| {
+        let rest = line.strip_prefix('[')?.trim_start();
+        let (seconds, message) = rest.split_once(']')?;
+        let time = seconds.trim().parse::<f64>().ok()?;
+        let unix = boot.saturating_add(time as u64);
+        (unix >= since && unix <= until && gpu_kernel_line(message)).then(|| line.chars().take(2048).collect())
+    }))
+}
+
+/// A kernel line of a GPU driver's: one that names it. "timeout", "reset"
+/// or "fault" alone would take USB, disk and network lines too, and
+/// "default"; the public row counts these lines as GPU records.
+#[cfg(target_os = "linux")]
+fn gpu_kernel_line(line: &str) -> bool {
+    const TERMS: [&str; 5] = ["amdgpu", "radeon", "nouveau", "nvidia", "i915"];
+    // Short terms only as whole words: "xe" is in "exec".
+    const WORDS: [&str; 3] = ["xe", "drm", "gpu"];
+    let lower = line.to_ascii_lowercase();
+    TERMS.iter().any(|term| lower.contains(term)) || lower.split(|c: char| !c.is_ascii_alphanumeric()).any(|word| WORDS.contains(&word))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kernel_filter_takes_short_terms_as_whole_words_only() {
+        assert!(gpu_kernel_line("xe 0000:03:00.0: [drm] GT0: hang"));
+        assert!(gpu_kernel_line("[drm:amdgpu_job_timedout] ring gfx_0.0.0 timeout"));
+        assert!(!gpu_kernel_line("audit: exec of /usr/bin/string during boot"));
+        // the words of a GPU reset, from another driver: not counted
+        assert!(!gpu_kernel_line("usb 1-4: reset high-speed USB device number 3 using xhci_hcd"));
+        assert!(!gpu_kernel_line("nvme nvme0: I/O 12 QID 3 timeout, aborting"));
+        assert!(!gpu_kernel_line("cfg80211: loading the default regulatory fault rules"));
+    }
+
+    #[test]
+    fn journal_parser_filters_gpu_lines_and_caps_count_and_length() {
+        let text = "noise\nkernel: amdgpu ring timeout\n";
+        assert_eq!(parse_journal(text).0, ["kernel: amdgpu ring timeout"]);
+        let many = (0..80).map(|n| format!("kernel: drm reset {n}")).collect::<Vec<_>>().join("\n");
+        let (records, capped) = parse_journal(&many);
+        assert_eq!(records.len(), 60);
+        assert!(capped);
+        assert!(kernel_status(&records, capped).starts_with("collected (incomplete):"));
+        assert!(!parse_journal(&many.lines().take(60).collect::<Vec<_>>().join("\n")).1);
+        assert!(parse_journal(&"x".repeat(4096)).0.is_empty());
+        assert_eq!(parse_journal(&format!("kernel: nvidia {}", "x".repeat(3000))).0[0].len(), 2048);
+    }
+
+    #[test]
+    fn unavailable_kernel_access_is_reported_separately_from_no_events() {
+        assert!(public_status(None).starts_with("not collected:"));
+        assert!(public_status(Some(&[])).starts_with("collected:"));
+        assert!(kernel_status(&[], true).starts_with("collected (incomplete):"));
+    }
+
+    #[test]
+    fn dmesg_fallback_uses_the_boot_time_and_requested_window() {
+        let text = "[ 100.0] amdgpu: ring timeout\n[ 200.0] drm: reset\n[ 100.0] unrelated\n";
+        assert_eq!(parse_dmesg(text, 1_000, 1_090, 1_150).0, ["[ 100.0] amdgpu: ring timeout"]);
     }
 }
 
@@ -349,6 +508,24 @@ mod windows_parser_tests {
         assert!(events[0].starts_with("Display 4101 at 2026-11-04T10:00:00"));
         assert!(events[1].starts_with("LiveKernelEvent 141 at 2026-11-04T10:00:01"));
         assert!(events.iter().all(|event| !event.contains("private event contents")));
+    }
+
+    #[test]
+    fn the_event_query_asks_for_the_window_only() {
+        let since = chrono::DateTime::parse_from_rfc3339("2026-11-04T09:58:00Z").unwrap().timestamp() as u64;
+        assert_eq!(
+            super::event_query(since, since + 420),
+            "/q:*[System[(EventID=4101 or EventID=1001) and TimeCreated[@SystemTime>='2026-11-04T09:58:00.000Z' and @SystemTime<='2026-11-04T10:05:00.000Z']]]"
+        );
+    }
+
+    #[test]
+    fn a_live_kernel_event_code_is_read_after_the_event_name() {
+        // a bucket that happens to read 141 is not the code
+        let xml = r#"<Events><Event><System><Provider Name="Windows Error Reporting"/><EventID>1001</EventID><TimeCreated SystemTime="2026-11-04T10:00:01.000Z"/></System><EventData><Data>141</Data><Data>0</Data><Data>LiveKernelEvent</Data><Data>Not available</Data><Data>0</Data><Data>117</Data></EventData></Event></Events>"#;
+        let (events, _) = super::parse_windows_events(xml, 0, i64::MAX as u64);
+        assert_eq!(events.len(), 1);
+        assert!(events[0].starts_with("LiveKernelEvent 117 at "), "{events:?}");
     }
 
     #[test]
@@ -418,125 +595,5 @@ mod timeout_tests {
         );
         assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(1));
-    }
-}
-
-#[cfg(windows)]
-fn windows_graphics_settings(deadline: Instant) -> Vec<String> {
-    let mut values = Vec::new();
-    for (key, name) in [
-        (r"HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers", "TdrDelay"),
-        (r"HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers", "TdrDdiDelay"),
-        (r"HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers", "TdrLevel"),
-        (r"HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers", "HwSchMode"),
-        (r"HKLM\SOFTWARE\Microsoft\Windows\Dwm", "OverlayTestMode"),
-    ] {
-        let output = output_before(std::process::Command::new("reg.exe").args(["query", key, "/v", name]), deadline);
-        if let Ok(output) = output
-            && output.status.success()
-        {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let value = stdout.lines().find(|line| line.contains(name)).unwrap_or("").trim();
-            if !value.is_empty() {
-                values.push(format!("{name}: {value}"));
-            }
-        }
-    }
-    values
-}
-
-#[cfg(windows)]
-fn watchdog_dumps(since: u64, until: u64) -> Vec<String> {
-    let root = std::env::var_os("SystemRoot")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
-    std::fs::read_dir(root.join("LiveKernelReports").join("WATCHDOG"))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| {
-            if !entry
-                .path()
-                .extension()
-                .is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("dmp"))
-            {
-                return None;
-            }
-            let metadata = entry.metadata().ok()?;
-            let modified = metadata.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
-            if modified < since || modified > until {
-                return None;
-            }
-            Some(format!("{} {modified}", entry.file_name().to_string_lossy()))
-        })
-        .take(60)
-        .collect()
-}
-
-#[cfg(target_os = "linux")]
-fn parse_journal(text: &str) -> (Vec<String>, bool) {
-    bounded_records(
-        text.lines()
-            .filter(|line| gpu_kernel_line(line))
-            .map(|line| line.chars().take(2048).collect()),
-    )
-}
-
-#[cfg(target_os = "linux")]
-fn parse_dmesg(text: &str, boot: u64, since: u64, until: u64) -> (Vec<String>, bool) {
-    bounded_records(text.lines().filter_map(|line| {
-        let rest = line.strip_prefix('[')?.trim_start();
-        let (seconds, message) = rest.split_once(']')?;
-        let time = seconds.trim().parse::<f64>().ok()?;
-        let unix = boot.saturating_add(time as u64);
-        (unix >= since && unix <= until && gpu_kernel_line(message)).then(|| line.chars().take(2048).collect())
-    }))
-}
-
-#[cfg(target_os = "linux")]
-fn gpu_kernel_line(line: &str) -> bool {
-    const TERMS: [&str; 8] = ["amdgpu", "radeon", "nouveau", "nvidia", "i915", "timeout", "reset", "fault"];
-    // Short terms only as whole words: "xe" is in "exec", "ring" in "string".
-    const WORDS: [&str; 4] = ["xe", "drm", "gpu", "ring"];
-    let lower = line.to_ascii_lowercase();
-    TERMS.iter().any(|term| lower.contains(term)) || lower.split(|c: char| !c.is_ascii_alphanumeric()).any(|word| WORDS.contains(&word))
-}
-
-#[cfg(all(test, target_os = "linux"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn kernel_filter_takes_short_terms_as_whole_words_only() {
-        assert!(gpu_kernel_line("xe 0000:03:00.0: [drm] GT0: hang"));
-        assert!(gpu_kernel_line("[drm:amdgpu_job_timedout] ring gfx_0.0.0 timeout"));
-        assert!(!gpu_kernel_line("audit: exec of /usr/bin/string during boot"));
-    }
-
-    #[test]
-    fn journal_parser_filters_gpu_lines_and_caps_count_and_length() {
-        let text = "noise\nkernel: amdgpu ring timeout\n";
-        assert_eq!(parse_journal(text).0, ["kernel: amdgpu ring timeout"]);
-        let many = (0..80).map(|n| format!("kernel: drm reset {n}")).collect::<Vec<_>>().join("\n");
-        let (records, capped) = parse_journal(&many);
-        assert_eq!(records.len(), 60);
-        assert!(capped);
-        assert!(kernel_status(&records, capped).starts_with("collected (incomplete):"));
-        assert!(!parse_journal(&many.lines().take(60).collect::<Vec<_>>().join("\n")).1);
-        assert!(parse_journal(&"x".repeat(4096)).0.is_empty());
-        assert_eq!(parse_journal(&format!("kernel: nvidia {}", "x".repeat(3000))).0[0].len(), 2048);
-    }
-
-    #[test]
-    fn unavailable_kernel_access_is_reported_separately_from_no_events() {
-        assert!(public_status(None).starts_with("not collected:"));
-        assert!(public_status(Some(&[])).starts_with("collected:"));
-        assert!(kernel_status(&[], true).starts_with("collected (incomplete):"));
-    }
-
-    #[test]
-    fn dmesg_fallback_uses_the_boot_time_and_requested_window() {
-        let text = "[ 100.0] amdgpu: ring timeout\n[ 200.0] drm: reset\n[ 100.0] unrelated\n";
-        assert_eq!(parse_dmesg(text, 1_000, 1_090, 1_150).0, ["[ 100.0] amdgpu: ring timeout"]);
     }
 }

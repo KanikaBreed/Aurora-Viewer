@@ -169,6 +169,10 @@ pub const EFFECT_WORDS: &[&str] = &[
     "diag-fetch-slots",
     "diag-bc7-off",
     "diag-present",
+    "diag-cpu-cull",
+    "diag-fully-bound",
+    "diag-no-write-staging",
+    "diag-no-pipeline-cache",
 ];
 
 /// The names `window_state` takes.

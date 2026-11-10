@@ -193,14 +193,22 @@ impl Native {
                 .enumerate()
                 .filter(|(i, m)| requirements.memory_type_bits & (1 << i) != 0 && m.property_flags.contains(flags))
                 // Device-coherent types are illegal unless their feature was enabled.
-                .filter(|(_, m)| plan.enabled.coherent || !m.property_flags.contains(vk::MemoryPropertyFlags::DEVICE_COHERENT_AMD))
+                .filter(|(_, m)| {
+                    plan.enabled.coherent
+                        || !m
+                            .property_flags
+                            .intersects(vk::MemoryPropertyFlags::DEVICE_COHERENT_AMD | vk::MemoryPropertyFlags::DEVICE_UNCACHED_AMD)
+                })
                 // System memory first: video memory can be wiped by the very
                 // reset the markers are there to explain (amdgpu "VRAM is
-                // lost"); then device-coherent, so the last writes reach it.
+                // lost"); then device-coherent, so the last writes reach it;
+                // then uncached, so they never wait in the GPU's L2 cache
+                // that a hang leaves unflushed.
                 .max_by_key(|(_, m)| {
                     (
                         !m.property_flags.contains(vk::MemoryPropertyFlags::DEVICE_LOCAL),
                         m.property_flags.contains(vk::MemoryPropertyFlags::DEVICE_COHERENT_AMD),
+                        m.property_flags.contains(vk::MemoryPropertyFlags::DEVICE_UNCACHED_AMD),
                     )
                 })
                 .map(|(i, _)| i as u32)
@@ -361,12 +369,34 @@ impl Native {
             return;
         }
         // wgpu also invalidates devices for OOM/Unexpected errors. The EXT
-        // query requires actual Vulkan device loss, not merely wgpu invalidity.
+        // query expects actual Vulkan device loss, not merely wgpu invalidity.
+        // A driver may only report the loss once its reset has finished
+        // (#3139: AMD on Windows answered the immediate probe otherwise
+        // while the OS logged a GPU reset), so the probe is retried for a
+        // while and its last answer goes into the report.
         // This driver call runs only here, never on a crash/reporting thread.
-        // SAFETY: unsignalled live fence created on this retained device.
-        if unsafe { self.raw.get_fence_status(self.loss_probe) } != Err(vk::Result::ERROR_DEVICE_LOST) {
-            report.fault = super::FaultStatus::Unconfirmed;
-            return;
+        let started = std::time::Instant::now();
+        let probe = loop {
+            // SAFETY: unsignalled live fence created on this retained device.
+            let status = match unsafe { self.raw.get_fence_status(self.loss_probe) } {
+                Ok(true) => vk::Result::SUCCESS,
+                Ok(false) => vk::Result::NOT_READY,
+                Err(e) => e,
+            };
+            if status == vk::Result::ERROR_DEVICE_LOST || started.elapsed() >= LOSS_PROBE_WAIT {
+                break status;
+            }
+            std::thread::sleep(LOSS_PROBE_STEP);
+        };
+        report.probe = probe.as_raw();
+        report.probe_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
+        if probe != vk::Result::ERROR_DEVICE_LOST {
+            if !query_unconfirmed() {
+                report.fault = super::FaultStatus::Unconfirmed;
+                return;
+            }
+            // Test builds: read the markers and ask for the fault anyway.
+            report.unconfirmed_query = true;
         }
         if let Ok(ring) = ring.lock() {
             report.saturated = ring.saturated;
@@ -547,6 +577,18 @@ fn checkpoint_stages(instance: &ash::Instance, physical: vk::PhysicalDevice, fam
         checkpoints[family as usize].checkpoint_execution_stage_mask
     }
 }
+/// How long the loss probe is retried before giving up on a typed
+/// ERROR_DEVICE_LOST (a Windows TDR takes about two seconds to reset).
+const LOSS_PROBE_WAIT: std::time::Duration = std::time::Duration::from_secs(6);
+const LOSS_PROBE_STEP: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// AURORA_GPU_FAULT_UNCONFIRMED: also read the markers and query the device
+/// fault when the probe never confirmed the loss (default on; `0` restores
+/// the strict behaviour). Only the test builds carry this switch.
+fn query_unconfirmed() -> bool {
+    std::env::var("AURORA_GPU_FAULT_UNCONFIRMED").map_or(true, |v| v.trim() != "0")
+}
+
 fn private_error(private: &mut Vec<u8>, result: vk::Result) {
     if private.try_reserve(256).is_ok() {
         use std::io::Write;
@@ -580,9 +622,10 @@ mod tests {
     }
     #[test]
     fn breadcrumb_creation_preserves_required_extensions_for_ordinary_and_xr_devices() {
+        // An AMD driver: it never offers the NV checkpoints.
         let offered = Capabilities {
             amd: true,
-            nv: true,
+            nv: false,
             fault: true,
             coherent: true,
         };

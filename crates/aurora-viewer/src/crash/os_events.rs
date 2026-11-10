@@ -30,6 +30,14 @@ fn output_before(command: &mut Command, deadline: Instant) -> std::io::Result<Ou
         return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "OS diagnostics budget expired"));
     }
     command.stdout(Stdio::piped()).stderr(Stdio::null());
+    // wevtutil.exe / reg.exe are console programs: started from the
+    // viewer or its windowless watcher, each would flash a console window
+    // on the tester's screen (#3139).
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
     let mut child = command.spawn()?;
     let stdout = child.stdout.take();
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);

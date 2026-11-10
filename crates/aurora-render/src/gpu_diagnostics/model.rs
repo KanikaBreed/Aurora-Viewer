@@ -71,8 +71,11 @@ impl Capabilities {
         match mode {
             Mode::Off | Mode::Fault => Method::Unavailable,
             Mode::Transfer => Method::Transfer,
-            Mode::Auto | Mode::Deep if self.amd => Method::Amd,
+            // NVIDIA drivers also offer VK_AMD_buffer_marker, which slowed
+            // their GPU frames about tenfold (#3127): their own checkpoints
+            // first. AMD drivers never offer the NV extension.
             Mode::Auto | Mode::Deep if self.nv => Method::Nv,
+            Mode::Auto | Mode::Deep if self.amd => Method::Amd,
             Mode::Auto => Method::Unavailable,
             Mode::Deep => Method::Transfer,
         }
@@ -283,6 +286,26 @@ pub struct Report {
     pub(super) addresses: u32,
     pub(super) vendors: u32,
     pub(super) address_kinds: u32,
+    /// Raw VkResult of the last loss probe (0 when none ran).
+    pub(super) probe: i32,
+    /// How long the probe waited for a typed device loss.
+    pub(super) probe_ms: u32,
+    /// The markers and fault were read without a typed device loss.
+    pub(super) unconfirmed_query: bool,
+}
+/// Closed names of the VkResult codes a loss probe can return.
+fn vk_result_name(code: i32) -> String {
+    match code {
+        0 => "SUCCESS".into(),
+        1 => "NOT_READY".into(),
+        2 => "TIMEOUT".into(),
+        -1 => "ERROR_OUT_OF_HOST_MEMORY".into(),
+        -2 => "ERROR_OUT_OF_DEVICE_MEMORY".into(),
+        -3 => "ERROR_INITIALIZATION_FAILED".into(),
+        -4 => "ERROR_DEVICE_LOST".into(),
+        -13 => "ERROR_UNKNOWN".into(),
+        other => format!("code {other}"),
+    }
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) enum Stage {
@@ -348,7 +371,7 @@ impl Report {
             .filter_map(|(i, kind)| ((self.address_kinds & (1 << i)) != 0).then_some(kind))
             .collect();
         format!(
-            "{status}; offered {}; enabled {}; {} addresses, {} vendor records{}{}",
+            "{status}; offered {}; enabled {}; {} addresses, {} vendor records{}{}{}",
             self.offered.fault,
             self.fault_enabled,
             self.addresses,
@@ -362,6 +385,20 @@ impl Report {
                 "; vendor detail available locally"
             } else {
                 ""
+            },
+            if self.probe_ms > 0 || self.probe != 0 {
+                format!(
+                    "; loss probe {} after {} ms{}",
+                    vk_result_name(self.probe),
+                    self.probe_ms,
+                    if self.unconfirmed_query {
+                        " (markers and fault read without a confirmed loss)"
+                    } else {
+                        ""
+                    }
+                )
+            } else {
+                String::new()
             }
         )
     }
@@ -376,7 +413,7 @@ impl Report {
             | (u8::from(self.offered.fault) << 2)
             | (u8::from(self.offered.coherent) << 3);
         format!(
-            "v1 {caps} {} {} {} {} {} {} {} {} {} {} {}\n",
+            "v2 {caps} {} {} {} {} {} {} {} {} {} {} {} {} {} {}\n",
             self.method as u8,
             u8::from(self.fault_enabled),
             self.generation,
@@ -387,7 +424,10 @@ impl Report {
             self.fault as u8,
             self.addresses,
             self.vendors,
-            self.address_kinds
+            self.address_kinds,
+            self.probe,
+            self.probe_ms,
+            u8::from(self.unconfirmed_query)
         )
     }
     pub fn decode_public(text: &str) -> Option<Self> {
@@ -433,10 +473,27 @@ impl Report {
             return None;
         }
         let mut fields = text.split_whitespace();
-        if fields.next()? != "v1" {
+        let version = fields.next()?;
+        if version != "v1" && version != "v2" {
             return None;
         }
-        let numbers: Vec<u64> = fields.map(str::parse).collect::<Result<_, _>>().ok()?;
+        let fields: Vec<&str> = fields.collect();
+        // v2 appends the probe: VkResult (signed), wait ms, unconfirmed flag.
+        let (fields, probe) = if version == "v2" {
+            let [rest @ .., code, ms, unconfirmed] = fields.as_slice() else {
+                return None;
+            };
+            let code: i32 = code.parse().ok()?;
+            let ms: u32 = ms.parse().ok()?;
+            let unconfirmed: u8 = unconfirmed.parse().ok()?;
+            if unconfirmed > 1 || ms > 600_000 || !(-1_000_000_000..=1_000_000_000).contains(&code) {
+                return None;
+            }
+            (rest.to_vec(), (code, ms, unconfirmed == 1))
+        } else {
+            (fields, (0, 0, false))
+        };
+        let numbers: Vec<u64> = fields.into_iter().map(str::parse).collect::<Result<_, _>>().ok()?;
         let [
             caps,
             method,
@@ -484,6 +541,9 @@ impl Report {
             addresses: *addresses as u32,
             vendors: *vendors as u32,
             address_kinds: *kinds as u32,
+            probe: probe.0,
+            probe_ms: probe.1,
+            unconfirmed_query: probe.2,
         })
     }
 }
@@ -526,16 +586,38 @@ mod tests {
             addresses: 2,
             vendors: 1,
             address_kinds: 2,
+            probe: -4,
+            probe_ms: 2150,
+            unconfirmed_query: false,
             ..Report::default()
         };
         let decoded = Report::decode_public(&report.encode_public()).unwrap();
         assert_eq!(decoded.breadcrumbs(), report.breadcrumbs());
         assert_eq!(decoded.fault(), report.fault());
         assert!(decoded.fault().contains("write-invalid"));
+        assert!(decoded.fault().contains("loss probe ERROR_DEVICE_LOST after 2150 ms"));
+        // An unconfirmed loss still read: its probe answer is published.
+        let unconfirmed = Report {
+            probe: 1,
+            probe_ms: 6000,
+            unconfirmed_query: true,
+            ..report.clone()
+        };
+        let decoded = Report::decode_public(&unconfirmed.encode_public()).unwrap();
+        assert!(
+            decoded
+                .fault()
+                .contains("loss probe NOT_READY after 6000 ms (markers and fault read without a confirmed loss)")
+        );
+        // Older v1 artifacts still decode, without a probe.
+        let v1 = Report::decode_public("v1 5 1 1 3 100 8 1 0 6 2 1 2").unwrap();
+        assert!(!v1.fault().contains("loss probe"));
         for malicious in [
             "private-driver-path",
             "v1 0 0 0 1 0 0 0 0 6 4294967295 0 0",
             "v1 0 0 0 1 0 99 0 0 6 0 0 0",
+            "v2 5 1 1 3 100 8 1 0 6 2 1 2 -4 2150 2",
+            "v2 5 1 1 3 100 8 1 0 6 2 1 2 private 2150 0",
         ] {
             assert!(Report::decode_public(malicious).is_none());
         }
@@ -656,6 +738,15 @@ mod tests {
             .select(Mode::Auto),
             Method::Nv
         );
+        // NVIDIA drivers offer VK_AMD_buffer_marker as well: their own
+        // checkpoints win in both modes (#3127).
+        let nvidia = Capabilities {
+            amd: true,
+            nv: true,
+            ..Capabilities::default()
+        };
+        assert_eq!(nvidia.select(Mode::Auto), Method::Nv);
+        assert_eq!(nvidia.select(Mode::Deep), Method::Nv);
     }
     #[test]
     fn breadcrumb_loss_before_first_submission_is_unavailable_not_a_cause() {

@@ -315,6 +315,13 @@ pub(super) fn effects(settings: &crate::settings::Settings, vr: bool) -> String 
         format_args!("diag-bc7-off"),
     );
     word(set("AURORA_PRESENT_MODE"), format_args!("diag-present"));
+    // the GPU-loss suspects of #3139
+    let off = |name: &str| std::env::var(name).is_ok_and(|v| v.trim() == "0");
+    let on = |name: &str| std::env::var(name).is_ok_and(|v| !v.trim().is_empty() && v.trim() != "0");
+    word(on("AURORA_CPU_CULL"), format_args!("diag-cpu-cull"));
+    word(on("AURORA_TEST_FULLY_BOUND"), format_args!("diag-fully-bound"));
+    word(off("AURORA_WRITE_STAGING"), format_args!("diag-no-write-staging"));
+    word(off("AURORA_PIPELINE_CACHE"), format_args!("diag-no-pipeline-cache"));
     out
 }
 

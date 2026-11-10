@@ -1892,7 +1892,11 @@ fn open_device(
     if afeat.contains(wgpu::Features::DEPTH_CLIP_CONTROL) && !portable_water {
         features |= wgpu::Features::DEPTH_CLIP_CONTROL;
     }
-    if afeat.contains(wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY) {
+    // AURORA_TEST_FULLY_BOUND=1 (GPU-loss test builds, #3139): every
+    // element of the texture page array is bound (textures.rs keeps its
+    // fully bound path), to rule out reads past the bound pages.
+    let fully_bound = std::env::var("AURORA_TEST_FULLY_BOUND").is_ok_and(|v| v.trim() == "1");
+    if afeat.contains(wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY) && !fully_bound {
         features |= wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY;
     }
     // BC7 texture pages (textures.rs): a quarter of the video memory of

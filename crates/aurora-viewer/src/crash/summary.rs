@@ -376,6 +376,9 @@ fn build_at(record: &super::Record, dir: &Path, boot_unix: Option<u64>) -> Summa
         body.push_str(&flight);
         body.push_str("```\n");
     }
+    if let Some(frames) = gpu_frames(&text(super::GPU_FRAMES_FILE)) {
+        body.push_str(&frames);
+    }
     let excerpt = super::privacy::excerpt(&tail);
     if !excerpt.is_empty() {
         body.push_str(&format!(
@@ -383,6 +386,63 @@ fn build_at(record: &super::Record, dir: &Path, boot_unix: Option<u64>) -> Summa
         ));
     }
     Summary { title, body, gpu }
+}
+
+/// Frames shown one by one before a GPU loss; the others are summed up in
+/// the "largest" row.
+const GPU_FRAMES_SHOWN: usize = 12;
+
+/// The section of the frames submitted before the first GPU loss
+/// (gpu-frames.txt, aurora_render::frame_log): numbers only, every line
+/// checked; anything else in the file is ignored.
+fn gpu_frames(text: &str) -> Option<String> {
+    use aurora_render::frame_log::FrameLine;
+    let lines: Vec<FrameLine> = text.lines().take(512).filter_map(FrameLine::decode).collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let mb = |bytes: u64| format!("{:.1}", bytes as f64 / (1024.0 * 1024.0));
+    let row = |label: String, l: &FrameLine| {
+        format!(
+            "| {label} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            l.upload_copies,
+            mb(l.upload_bytes),
+            l.write_buffers,
+            l.write_textures,
+            l.write_submits,
+            mb(l.write_bytes),
+            l.bind_group_rebuilds,
+            l.draws,
+            l.shadow_draws,
+            if l.gpu_cull { "GPU" } else { "CPU" }
+        )
+    };
+    let mut out = format!(
+        "\n### Frames before the GPU loss\n\nThe work of each frame submitted in the last {:.1} s before the loss ({} frames; the last {} shown, newest last).\n\n\
+         | Frame (s before loss) | Copies | Copied MB | Buffer writes | Texture writes | Extra submits | Written MB | Texture-table rebuilds | Draws | Shadow draws | Lists |\n\
+         |---|---|---|---|---|---|---|---|---|---|---|\n",
+        lines.first().map_or(0.0, |l| l.before_loss_ms as f32 / 1000.0),
+        lines.len(),
+        GPU_FRAMES_SHOWN.min(lines.len()),
+    );
+    for l in &lines[lines.len().saturating_sub(GPU_FRAMES_SHOWN)..] {
+        out.push_str(&row(format!("{} ({:.2})", l.frame, l.before_loss_ms as f32 / 1000.0), l));
+    }
+    let largest = lines.iter().fold(FrameLine::default(), |m, l| FrameLine {
+        upload_copies: m.upload_copies.max(l.upload_copies),
+        upload_bytes: m.upload_bytes.max(l.upload_bytes),
+        write_buffers: m.write_buffers.max(l.write_buffers),
+        write_textures: m.write_textures.max(l.write_textures),
+        write_submits: m.write_submits.max(l.write_submits),
+        write_bytes: m.write_bytes.max(l.write_bytes),
+        bind_group_rebuilds: m.bind_group_rebuilds.max(l.bind_group_rebuilds),
+        draws: m.draws.max(l.draws),
+        shadow_draws: m.shadow_draws.max(l.shadow_draws),
+        gpu_cull: m.gpu_cull || l.gpu_cull,
+        ..FrameLine::default()
+    });
+    out.push_str(&row("largest of all kept".to_owned(), &largest));
+    Some(out)
 }
 
 /// Public OS evidence uses fixed labels. Raw Linux kernel messages and local
@@ -1498,6 +1558,33 @@ mod tests {
         assert!(!body.contains("0x12345678"));
         std::fs::write(dir.join("gpu-breadcrumbs.txt"), "v1 private-user-path").unwrap();
         assert!(!build(&record, &dir).body.contains("GPU breadcrumbs"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_frames_before_a_gpu_loss_are_a_table_of_numbers_only() {
+        let (dir, record) = session();
+        let mut text = String::new();
+        for i in 0..20u64 {
+            text.push_str(&format!(
+                "{} {} 10 1048576 4 2 0 2097152 0 3000 900 4000000 1\n",
+                42828 + i,
+                2000 - i * 100
+            ));
+        }
+        text.push_str("private-user-path 1 2\n");
+        text.push_str("42848 0 812 34603008 4100 12 2 9437184 1 3120 900 4200000 1\n");
+        std::fs::write(dir.join(super::super::GPU_FRAMES_FILE), text).unwrap();
+        let body = build(&record, &dir).body;
+        assert!(body.contains("### Frames before the GPU loss"), "{body}");
+        assert!(body.contains("(21 frames; the last 12 shown"), "{body}");
+        assert!(
+            body.contains("| 42848 (0.00) | 812 | 33.0 | 4100 | 12 | 2 | 9.0 | 1 | 3120 | 900 | GPU |"),
+            "{body}"
+        );
+        assert!(body.contains("| largest of all kept | 812 | 33.0 |"), "{body}");
+        assert!(!body.contains("42828 ("), "older frames are summed up, not listed");
+        assert!(!body.contains("private-user-path"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

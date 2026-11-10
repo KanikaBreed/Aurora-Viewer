@@ -251,6 +251,8 @@ impl App {
         self.crash_swapchain = Default::default();
         self.crash_recent = Default::default();
         crate::crash::gpu_recovered(started.elapsed().as_millis(), safe);
+        // AURORA_TEST_GENTLE_RECOVERY: the reload streams slowly (#3139)
+        crate::scene::test_limits::note_recovery();
         // the new egui renderer has none of egui's textures
         self.egui_replay = true;
         log::warn!(

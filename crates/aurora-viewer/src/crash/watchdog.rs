@@ -173,6 +173,8 @@ pub const EFFECT_WORDS: &[&str] = &[
     "diag-fully-bound",
     "diag-no-write-staging",
     "diag-no-pipeline-cache",
+    "diag-slow-uploads",
+    "diag-gentle-recovery",
 ];
 
 /// The names `window_state` takes.

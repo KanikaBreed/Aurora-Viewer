@@ -108,6 +108,9 @@ pub(crate) enum Boundary {
     FrameEnd,
     PhotoBegin,
     PhotoEnd,
+    /// The frame's streamed copies (upload.rs), submitted before its passes.
+    UploadsBegin,
+    UploadsEnd,
 }
 impl Boundary {
     pub(super) fn name(self) -> &'static str {
@@ -134,6 +137,8 @@ impl Boundary {
             Self::PostEnd => "post end",
             Self::PhotoBegin => "photo begin",
             Self::PhotoEnd => "photo end",
+            Self::UploadsBegin => "uploads begin",
+            Self::UploadsEnd => "uploads end",
         }
     }
     #[cfg(any(not(target_os = "macos"), test))]
@@ -151,6 +156,7 @@ impl Boundary {
                 | Self::SsrWaterBlendBegin
                 | Self::PostBegin
                 | Self::PhotoBegin
+                | Self::UploadsBegin
         )
     }
 }
@@ -445,7 +451,7 @@ impl Report {
             FaultStatus::Unconfirmed,
             FaultStatus::NotRequested,
         ];
-        const BOUNDARIES: [Boundary; 22] = [
+        const BOUNDARIES: [Boundary; 24] = [
             Boundary::FrameBegin,
             Boundary::ShadowsBegin,
             Boundary::ShadowsEnd,
@@ -468,6 +474,8 @@ impl Report {
             Boundary::FrameEnd,
             Boundary::PhotoBegin,
             Boundary::PhotoEnd,
+            Boundary::UploadsBegin,
+            Boundary::UploadsEnd,
         ];
         if text.len() > 512 {
             return None;

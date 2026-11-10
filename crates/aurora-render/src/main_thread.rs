@@ -1409,7 +1409,11 @@ impl Renderer {
             texture_bytes: self.textures.bytes(),
             texture_pages: self.textures.pages(),
             texture_page_bytes: self.textures.page_bytes(),
-            bind_group_rebuilds: self.textures.bind_group_rebuilds(),
+            bind_group_rebuilds: {
+                // the per-frame share for a GPU loss report (frame_log.rs)
+                crate::frame_log::note_rebuilds(self.textures.bind_group_rebuilds());
+                self.textures.bind_group_rebuilds()
+            },
             geometry_bytes: self.geometry.bytes(),
             records: self.records.live(),
             render_thread: self.host.threaded(),

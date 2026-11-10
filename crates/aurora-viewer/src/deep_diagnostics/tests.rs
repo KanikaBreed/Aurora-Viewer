@@ -126,7 +126,8 @@ fn build_bundle_reads_only_filtered_source_artifacts_and_excludes_private_sessio
     assert!(all.contains("module_count"));
     assert!(all.contains("1920"));
     assert!(all.contains("draw_distance"));
-    assert!(all.contains("v1 5 1 1 3 100 8 1 0 6 2 1 2"));
+    // re-encoded in the current schema (v2 adds the loss probe)
+    assert!(all.contains("v2 5 1 1 3 100 8 1 0 6 2 1 2 0 0 0"));
     assert!(!all.contains("gpu-device-fault-private.txt"));
 
     std::fs::remove_dir_all(root).unwrap();

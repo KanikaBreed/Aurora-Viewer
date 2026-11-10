@@ -174,6 +174,26 @@ impl Frame {
         #[cfg(target_os = "macos")]
         let _ = (encoder, method, offset, token);
     }
+    /// A command buffer holding only this boundary's marker, for work
+    /// submitted outside the frame's encoders (the streamed uploads, first
+    /// in the frame's submit). Record it before the frame's own marks: the
+    /// ring orders tokens by recording.
+    pub(crate) fn marker_buffer(&self, boundary: Boundary) -> Option<wgpu::CommandBuffer> {
+        let (offset, token) = self.recorder.ring.lock().ok().and_then(|mut r| r.record(self.ticket, boundary))?;
+        #[cfg(not(target_os = "macos"))]
+        {
+            let mut marker = self.recorder.native.encoder();
+            self.recorder
+                .native
+                .record(&mut marker, self.recorder.baseline.method, offset, token, boundary.begin());
+            Some(marker.finish())
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (offset, token);
+            None
+        }
+    }
     pub(crate) fn finish(&self, encoder: &mut wgpu::CommandEncoder) {
         #[cfg(not(target_os = "macos"))]
         {

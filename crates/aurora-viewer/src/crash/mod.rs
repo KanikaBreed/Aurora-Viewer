@@ -408,12 +408,32 @@ pub fn gpu_lost() {
 /// may recover from. Keep only the first loss snapshot for this session.
 pub fn gpu_loss_snapshot() {
     snapshot_gpu_diagnostics();
+    if let Some(session) = SESSION.get() {
+        write_gpu_frames(&session.dir);
+    }
     crate::overlay_hooks::loss_snapshot();
     environment::at_gpu_loss();
     if let Some(session) = SESSION.get() {
         flight_recorder::capture(&session.dir, flight_recorder::Trigger::GpuLoss);
     }
 }
+
+/// The frames before the first GPU loss (aurora_render::frame_log), one
+/// line of numbers each, written once.
+fn write_gpu_frames(dir: &Path) {
+    aurora_render::frame_log::freeze();
+    let path = dir.join(GPU_FRAMES_FILE);
+    if path.exists() {
+        return;
+    }
+    let Some(lines) = aurora_render::frame_log::frozen() else {
+        return;
+    };
+    let text: String = lines.iter().map(|line| line.encode() + "\n").collect();
+    let _ = crate::atomic_file::publish(&path, text.as_bytes());
+}
+
+pub(crate) const GPU_FRAMES_FILE: &str = "gpu-frames.txt";
 
 #[cfg(windows)]
 pub(crate) fn overlay_hooks_at_loss(files: &[&str]) {

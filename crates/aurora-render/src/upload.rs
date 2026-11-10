@@ -634,6 +634,10 @@ fn mesh_ranges(vertex_count: u32, index_count: u32, skinned: bool) -> [(u64, u64
 pub struct UploadQueue {
     pool: Arc<StagingPool>,
     encoder: Option<wgpu::CommandEncoder>,
+    /// Copies and bytes recorded since the last [`Self::take_frame`]
+    /// (frame_log.rs).
+    copies: u32,
+    bytes: u64,
 }
 
 impl UploadQueue {
@@ -641,6 +645,8 @@ impl UploadQueue {
         UploadQueue {
             pool: StagingPool::new(device, small),
             encoder: None,
+            copies: 0,
+            bytes: 0,
         }
     }
 
@@ -670,6 +676,8 @@ impl UploadQueue {
         }
         let src = staged.buffer().clone();
         let offset = staged.offset + at;
+        self.copies = self.copies.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(size);
         self.encoder(device).copy_buffer_to_buffer(&src, offset, dst, dst_offset, size);
     }
 
@@ -678,6 +686,10 @@ impl UploadQueue {
     pub fn copy_to_layer(&mut self, device: &wgpu::Device, staged: &StagedTexture, texture: &wgpu::Texture, layer: u32, count: u32) {
         let src = staged.data.buffer().clone();
         let base = staged.data.offset;
+        for l in staged.levels.iter().take(count as usize) {
+            self.copies = self.copies.saturating_add(1);
+            self.bytes = self.bytes.saturating_add(staged.format.level_bytes(l.width, l.height));
+        }
         let enc = self.encoder(device);
         for (i, l) in staged.levels.iter().take(count as usize).enumerate() {
             let (width, height) = staged.format.copy_extent(l.width, l.height);
@@ -720,6 +732,8 @@ impl UploadQueue {
             encoder: self.encoder.take(),
             recycle: self.pool.take_recyclable(),
             returned: self.pool.returned.clone(),
+            copies: std::mem::take(&mut self.copies),
+            bytes: std::mem::take(&mut self.bytes),
         }
     }
 }
@@ -729,6 +743,9 @@ pub struct FrameUploads {
     encoder: Option<wgpu::CommandEncoder>,
     recycle: Vec<Arc<Chunk>>,
     returned: Returned,
+    /// The streamed copies of the frame and their bytes (frame_log.rs).
+    pub copies: u32,
+    pub bytes: u64,
 }
 
 impl FrameUploads {
@@ -739,6 +756,8 @@ impl FrameUploads {
             encoder: None,
             recycle: Vec::new(),
             returned: self.returned.clone(),
+            copies: 0,
+            bytes: 0,
         }
     }
     /// The recorded copies: first command buffer of the frame's submit.

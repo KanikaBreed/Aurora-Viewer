@@ -66,6 +66,7 @@ pub mod surface_area;
 mod sync_check;
 mod sync_plan;
 mod sync_slow;
+pub mod test_limits;
 mod tree_detail;
 mod world_overlays;
 pub use sync_plan::LodInfo;
@@ -2029,11 +2030,24 @@ impl Scene {
         }
         let mut t = self.parts.lap(Part::Fetched, t);
         let mut jobs_done = 0;
+        // GPU-loss test switches (test_limits.rs): fewer geometries a frame
+        let geometry_cap = if test_limits::capped() {
+            test_limits::GEOMETRIES
+        } else {
+            usize::MAX
+        };
+        let mut geometries = 0;
         while jobs_done == 0 || t0.elapsed() < budget {
+            if geometries >= geometry_cap {
+                break;
+            }
             let Ok(r) = self.job_rx.try_recv() else {
                 break;
             };
             jobs_done += 1;
+            if matches!(r, JobResult::Geometry { .. }) {
+                geometries += 1;
+            }
             let part = if matches!(r, JobResult::Geometry { .. }) {
                 Part::Geometry
             } else {

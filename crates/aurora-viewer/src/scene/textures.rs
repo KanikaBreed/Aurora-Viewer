@@ -704,6 +704,8 @@ impl PartialOrd for PendingUpload {
 pub struct UploadBudget {
     pub time: Duration,
     pub bytes: u64,
+    /// Uploads a frame (GPU-loss test switches, test_limits.rs).
+    pub count: usize,
 }
 
 /// Main-thread time a frame of `frame` may give to a streaming step: 5 % of
@@ -718,9 +720,11 @@ pub fn frame_share(frame: Duration, floor: Duration) -> Duration {
 impl UploadBudget {
     /// The budget of a frame that lasts `frame`.
     pub fn for_frame(frame: Duration) -> Self {
+        let capped = super::test_limits::capped();
         UploadBudget {
             time: frame_share(frame, Duration::from_micros(800)),
-            bytes: 24 << 20,
+            bytes: if capped { super::test_limits::TEXTURE_BYTES } else { 24 << 20 },
+            count: if capped { super::test_limits::TEXTURES } else { usize::MAX },
         }
     }
 }
@@ -730,7 +734,7 @@ impl UploadBudget {
     /// in `elapsed`: always the first of the frame (a texture larger than
     /// the budget still goes), then while both budgets hold.
     pub fn allows(&self, done: usize, bytes: u64, elapsed: Duration) -> bool {
-        done == 0 || (bytes < self.bytes && elapsed < self.time)
+        done == 0 || (done < self.count && bytes < self.bytes && elapsed < self.time)
     }
 }
 
@@ -5669,6 +5673,7 @@ mod tests {
         let b = UploadBudget {
             time: Duration::from_millis(1),
             bytes: 1000,
+            count: usize::MAX,
         };
         // nothing done yet: even over time (a slow frame start)
         assert!(b.allows(0, 0, Duration::from_millis(5)));

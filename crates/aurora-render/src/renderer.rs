@@ -7496,6 +7496,16 @@ impl Backend {
             }
         };
         use crate::gpu_diagnostics::Boundary as GpuBoundary;
+        // The streamed copies go first in the frame's submit, before
+        // FrameBegin: their own markers tell a hang in the copies from one
+        // in the passes (#3139). Recorded before the frame's marks.
+        let (uploads_begin, uploads_end) = match (&breadcrumbs, &upload_cmds) {
+            (Some(frame), Some(_)) => (
+                frame.marker_buffer(GpuBoundary::UploadsBegin),
+                frame.marker_buffer(GpuBoundary::UploadsEnd),
+            ),
+            _ => (None, None),
+        };
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
@@ -9642,11 +9652,31 @@ impl Backend {
             &self.lost,
             &self.queue,
             index,
-            upload_cmds.into_iter().chain(extra_cmds).chain(output_transition),
+            uploads_begin
+                .into_iter()
+                .chain(upload_cmds)
+                .chain(uploads_end)
+                .chain(extra_cmds)
+                .chain(output_transition),
         );
         if let Some(frame) = breadcrumbs {
             self.queue.on_submitted_work_done(move || frame.completed());
         }
+        // the frame's work, for the report of a GPU loss (frame_log.rs)
+        crate::frame_log::push(crate::frame_log::FrameLine {
+            frame: index,
+            upload_copies: frame_uploads.copies,
+            upload_bytes: frame_uploads.bytes,
+            write_buffers: counts[0].min(u32::MAX as usize) as u32,
+            write_textures: counts[1].min(u32::MAX as usize) as u32,
+            write_submits: counts[2].min(u32::MAX as usize) as u32,
+            write_bytes: recorded as u64,
+            draws: stats.draws,
+            shadow_draws: stats.shadow_draws,
+            triangles: stats.triangles,
+            gpu_cull: stats.gpu_cull,
+            ..Default::default()
+        });
         self.gpu_frames.submitted(index, submission);
         if self.gpu_frames.enabled {
             // the news as soon as a poll sees the frame done (the start of

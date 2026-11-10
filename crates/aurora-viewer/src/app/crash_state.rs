@@ -322,6 +322,8 @@ pub(super) fn effects(settings: &crate::settings::Settings, vr: bool) -> String 
     word(on("AURORA_TEST_FULLY_BOUND"), format_args!("diag-fully-bound"));
     word(off("AURORA_WRITE_STAGING"), format_args!("diag-no-write-staging"));
     word(off("AURORA_PIPELINE_CACHE"), format_args!("diag-no-pipeline-cache"));
+    word(crate::scene::test_limits::slow_uploads(), format_args!("diag-slow-uploads"));
+    word(crate::scene::test_limits::gentle_recovery(), format_args!("diag-gentle-recovery"));
     out
 }
 

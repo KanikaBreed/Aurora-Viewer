@@ -188,6 +188,8 @@ impl DeviceLost {
         let index = SEEN_BY.iter().position(|w| *w == by).unwrap_or(SEEN_BY.len() - 1) as u8 + 1;
         let _ = FIRST_SEEN.compare_exchange(0, index, Ordering::Relaxed, Ordering::Relaxed);
         self.lost.store(true, Ordering::Release);
+        // the frames before it, for the report (frame_log.rs)
+        crate::frame_log::freeze();
         if let Some(recorder) = &self.diagnostics {
             recorder.lost(!matches!(by, "demo" | "start"));
         }

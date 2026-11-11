@@ -48,6 +48,7 @@ pub mod pipeline_cache;
 mod portal_tests;
 pub mod present;
 pub mod preview;
+mod preview_mesh;
 pub mod probes;
 pub mod projector_shadows;
 mod readback;
@@ -1064,7 +1065,7 @@ fn probe(@builtin(global_invocation_id) id:vec3<u32>) {{
         validate(&crate::contact_shadows::shader_source(count, hard));
         // the diagnostic variants (AURORA_CONTACT_VARIANT)
         use crate::contact_shadows::ZeroInit;
-        use crate::contact_shadows::{Variant, variant_source};
+        use crate::contact_shadows::{Variant, photo_source, variant_source};
         for v in [
             Variant::NoEarlyOut,
             Variant::NoShared,
@@ -1077,6 +1078,9 @@ fn probe(@builtin(global_invocation_id) id:vec3<u32>) {{
         }
         validate(&ZeroInit::Explicit.source(variant_source(Variant::Bend)));
         validate(&ZeroInit::Explicit.source(crate::contact_shadows::shader_source(192, 13)));
+        // a photo's on the RX 9000 cards, up to the most samples
+        validate(&photo_source(Variant::NoShared, 192, 13));
+        validate(&photo_source(Variant::NoShared, count, hard));
     }
 
     #[test]

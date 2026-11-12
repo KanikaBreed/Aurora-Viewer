@@ -2669,6 +2669,7 @@ ui-options-slurl-links = Liens Second Life
 ui-options-slurl-links-open = Ouvrir les liens SLURL et Hypergrid dans Aurora
 ui-options-slurl-links-open-help = Enregistre secondlife://, hop:// et x-grid-location-info:// pour cet utilisateur. Avant la connexion, un lieu sélectionne sa grille et le point de départ ; dans le monde, sa fiche s’ouvre.
 ui-options-slurl-links-other = Ces liens s'ouvrent actuellement dans { $program }.
+ui-options-slurl-links-kept = macOS ne permet pas à une application de rendre ces liens. Un autre viewer peut les prendre dans ses propres réglages.
 ui-options-backup = Sauvegarde
 ui-options-backup-save = Sauvegarder les réglages
 ui-options-backup-save-help = Enregistre les préférences, les couleurs, les raccourcis, les barres, la disposition des fenêtres, le skin et les fichiers de préférences de chaque compte (groupes de contacts, volumes des voix, assets bloqués…) dans un seul fichier, pour les remettre après une réinitialisation ou sur un autre PC. Rien de la connexion n'y figure, ni vos clés des services de GIF.

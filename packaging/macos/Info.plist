@@ -42,6 +42,23 @@
 	<true/>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<!-- secondlife:, hop: and x-grid-location-info:, the same three schemes as
+	     the Legacy Viewer's CFBundleURLTypes. Not marked as Apple's default:
+	     taking the links stays a choice in Preferences, as on Windows and
+	     Linux. Launch Services then sends kAEGetURL to the running app. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>Virtual World URL</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>secondlife</string>
+				<string>hop</string>
+				<string>x-grid-location-info</string>
+			</array>
+		</dict>
+	</array>
 	<!-- voice chat: without it macOS ends the app when the microphone opens -->
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Aurora Viewer uses the microphone for voice chat in Second Life.</string>

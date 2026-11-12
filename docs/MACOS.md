@@ -132,10 +132,18 @@ cache and logs are kept: they are not inside the application.
 To see these folders in the Finder: **Go › Go to Folder…** (Cmd+Shift+G) and
 paste the path.
 
+## Links from a web browser
+
+Preferences › Language and updates › Second Life links, in the application
+bundle, makes Aurora the program that opens `secondlife://`, `hop://` and
+`x-grid-location-info://`. macOS does not let an app give that choice back:
+another viewer takes the links from its own settings, or removing Aurora
+Viewer.app drops them. A link while Aurora is running is delivered to that
+copy. A build that is not the application bundle cannot register.
+
 ## Not on macOS yet
 
 - Automatic installation of updates (above).
-- Opening `secondlife://` links from a web browser.
 - The crash report window.
 
 ## Building from source

@@ -25,13 +25,48 @@ pub enum Handler {
     None,
 }
 
-/// Whether this system lets Aurora register itself.
+/// Whether this system lets Aurora register itself. On macOS only an
+/// application bundle can own a scheme (Launch Services).
 pub fn supported() -> bool {
-    cfg!(any(windows, target_os = "linux"))
+    cfg!(any(windows, target_os = "linux")) || runs_in_bundle()
 }
 
-#[cfg(any(windows, target_os = "linux"))]
-const SCHEMES: [&str; 3] = ["secondlife", "hop", "x-grid-location-info"];
+/// This process is `Name.app/Contents/MacOS/<exe>`.
+fn runs_in_bundle() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        std::env::current_exe().is_ok_and(|exe| runs_from_bundle(&exe))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// `…/Name.app/Contents/MacOS/<exe>`.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn runs_from_bundle(exe: &std::path::Path) -> bool {
+    bundle_root(exe).is_some()
+}
+
+/// The `.app` that contains `exe`.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn bundle_root(exe: &std::path::Path) -> Option<&std::path::Path> {
+    let macos = exe.parent()?;
+    if macos.file_name()? != "MacOS" {
+        return None;
+    }
+    let contents = macos.parent()?;
+    if contents.file_name()? != "Contents" {
+        return None;
+    }
+    let app = contents.parent()?;
+    (app.extension()? == "app").then_some(app)
+}
+
+/// `secondlife:`, `hop:` and `x-grid-location-info:` (the Legacy Viewer's
+/// `CFBundleURLSchemes`).
+pub(crate) const SCHEMES: [&str; 3] = ["secondlife", "hop", "x-grid-location-info"];
 
 #[cfg(windows)]
 mod win {
@@ -666,18 +701,22 @@ mod xdg {
 #[cfg(target_os = "linux")]
 pub use xdg::{register, registrations, unregister};
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+pub use mac::{register, unregister};
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn register() -> Result<(), String> {
     Err("not supported on this system".into())
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn unregister() -> Result<(), String> {
     Ok(())
 }
 
-/// Nothing registered elsewhere (macOS): the bundle declares no scheme yet,
-/// and once it does, Launch Services forgets it with the application.
+/// Nothing to delete by path. On macOS, Launch Services drops the claim
+/// when the application bundle is removed; the system does not let an app
+/// clear a default it holds.
 #[cfg(not(any(windows, target_os = "linux")))]
 pub fn registrations() -> Vec<String> {
     Vec::new()
@@ -700,7 +739,9 @@ pub fn handler() -> Handler {
     let handler = win::handler();
     #[cfg(target_os = "linux")]
     let handler = xdg::handler();
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    let handler = mac::handler();
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     let handler = Handler::None;
     *cache = Some((std::time::Instant::now(), handler.clone()));
     handler
@@ -721,6 +762,154 @@ pub fn repair_at_start() {
         win::repair();
         #[cfg(target_os = "linux")]
         xdg::repair();
+    }
+}
+
+/// Launch Services: who opens a scheme, and making this bundle that program.
+/// `NSWorkspace` `URLForApplicationToOpenURL:` and
+/// `setDefaultApplicationAtURL:toOpenURLsWithScheme:completionHandler:`.
+/// macOS does not let an app clear a default, so `unregister` does nothing
+/// and the preferences switch stays on once Aurora owns the links.
+#[cfg(target_os = "macos")]
+mod mac {
+    use super::{Handler, SCHEMES, bundle_root};
+    use block2::RcBlock;
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::{NSError, NSString, NSURL};
+
+    fn our_bundle() -> Option<std::path::PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        bundle_root(&exe).map(std::path::Path::to_path_buf)
+    }
+
+    fn file_url(path: &std::path::Path) -> objc2::rc::Retained<NSURL> {
+        NSURL::fileURLWithPath(&NSString::from_str(&path.display().to_string()))
+    }
+
+    fn path_of(url: &NSURL) -> Option<std::path::PathBuf> {
+        let path = url.path()?;
+        Some(std::path::PathBuf::from(path.to_string()))
+    }
+
+    fn same_bundle(ours: &std::path::Path, theirs: &std::path::Path) -> bool {
+        if ours == theirs {
+            return true;
+        }
+        match (ours.canonicalize(), theirs.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    }
+
+    fn handler_for(scheme: &str, ours: Option<&std::path::Path>) -> Handler {
+        let probe = NSString::from_str(&format!("{scheme}://"));
+        let Some(url) = NSURL::URLWithString(&probe) else {
+            return Handler::None;
+        };
+        let Some(app) = NSWorkspace::sharedWorkspace().URLForApplicationToOpenURL(&url) else {
+            return Handler::None;
+        };
+        let Some(path) = path_of(&app) else {
+            return Handler::None;
+        };
+        if ours.is_some_and(|ours| same_bundle(ours, &path)) {
+            return Handler::This;
+        }
+        Handler::Other(
+            path.file_stem()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string()),
+        )
+    }
+
+    pub fn handler() -> Handler {
+        let ours = our_bundle();
+        SCHEMES
+            .iter()
+            .map(|scheme| handler_for(scheme, ours.as_deref()))
+            .find(|handler| *handler != Handler::This)
+            .unwrap_or(Handler::This)
+    }
+
+    pub fn register() -> Result<(), String> {
+        let Some(bundle) = our_bundle() else {
+            return Err("Aurora is not running from an application bundle".into());
+        };
+        let app = file_url(&bundle);
+        let workspace = NSWorkspace::sharedWorkspace();
+        for scheme in SCHEMES {
+            let name = NSString::from_str(scheme);
+            let block = RcBlock::new(move |error: *mut NSError| {
+                if error.is_null() {
+                    log::info!("{scheme} links: registered for this user");
+                    // The preferences read may have run before Launch Services
+                    // finished. Drop the cache so the next frame sees it.
+                    super::refresh();
+                    return;
+                }
+                // SAFETY: a non-null error pointer from the completion handler
+                // is a live NSError for this call.
+                let message = unsafe { &*error }.localizedDescription();
+                log::warn!("secondlife links: {scheme} not registered ({message})");
+            });
+            workspace.setDefaultApplicationAtURL_toOpenURLsWithScheme_completionHandler(&app, &name, Some(&block));
+            log::info!("{scheme} links: asked to be the default");
+        }
+        Ok(())
+    }
+
+    /// macOS keeps the default until another application takes it, or this
+    /// bundle is removed.
+    pub fn unregister() -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod plist_tests {
+    use super::SCHEMES;
+
+    /// Schemes named under `CFBundleURLSchemes`, in document order.
+    fn plist_url_schemes(plist: &str) -> Vec<&str> {
+        let Some(at) = plist.find("<key>CFBundleURLSchemes</key>") else {
+            return Vec::new();
+        };
+        let Some(array) = plist[at..].find("<array>") else {
+            return Vec::new();
+        };
+        let body = &plist[at + array..];
+        let body = &body[..body.find("</array>").unwrap_or(body.len())];
+        let mut found = Vec::new();
+        let mut rest = body;
+        while let Some(start) = rest.find("<string>") {
+            rest = &rest[start + "<string>".len()..];
+            let Some(end) = rest.find("</string>") else {
+                break;
+            };
+            found.push(rest[..end].trim());
+            rest = &rest[end..];
+        }
+        found
+    }
+
+    #[test]
+    fn the_bundle_declares_the_three_link_schemes() {
+        let plist = include_str!("../../../packaging/macos/Info.plist");
+        assert_eq!(plist_url_schemes(plist), SCHEMES);
+    }
+
+    #[test]
+    fn an_executable_inside_a_bundle_can_own_the_schemes() {
+        let bundled = std::path::Path::new("/Applications/Aurora Viewer.app/Contents/MacOS/aurora-viewer");
+        assert!(super::runs_from_bundle(bundled));
+        assert_eq!(
+            super::bundle_root(bundled),
+            Some(std::path::Path::new("/Applications/Aurora Viewer.app"))
+        );
+        assert!(!super::runs_from_bundle(std::path::Path::new("/usr/local/bin/aurora-viewer")));
+        assert!(!super::runs_from_bundle(std::path::Path::new(
+            "/Applications/Aurora Viewer.app/aurora-viewer"
+        )));
     }
 }
 

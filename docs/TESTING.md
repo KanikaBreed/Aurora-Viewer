@@ -138,6 +138,19 @@ receiver, including titled test windows. Explicitly titled senders select
 only receivers with that title; offline demos never receive online links.
 Actual grid login and teleporting are performed by the human.
 
+## macOS link schemes
+
+There is no offline demo. The bundle's `CFBundleURLTypes` lists
+`secondlife`, `hop` and `x-grid-location-info`, and a unit test checks that
+list. On a Mac, run the application bundle (a `cargo` build is not one):
+
+- Preferences › Language and updates › Second Life links is shown. Turn it
+  on. A `secondlife://` link from a browser opens this Aurora. While it is
+  already running, the link arrives there and does not start a second copy.
+- Once Aurora owns the links, the switch stays on and says macOS cannot
+  give them back. Another viewer can take them from its own settings.
+- Linux and Windows keep the same switch, including turning it off.
+
 ## General
 
 | Variable | Effect |

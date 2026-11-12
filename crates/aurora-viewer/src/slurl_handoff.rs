@@ -26,6 +26,12 @@
 //! which every viewer of that family owns: a link would otherwise go to
 //! whichever of them started first. Demo mode and `--title` windows add
 //! their own part to the name.
+//!
+//! On macOS, Launch Services delivers the link to the running application
+//! as `kAEGetURL` (`llappdelegate-objc.mm` `applicationWillFinishLaunching`
+//! / `handleGetURLEvent`). There is no second process to hand it to.
+//! `listen` installs that handler after the event loop exists and before
+//! `run_app` (winit has no URL-open event).
 
 use crossbeam_channel::Receiver;
 
@@ -35,12 +41,15 @@ mod windows;
 pub use windows::{focused, hand_off, listen, release, window_ready};
 
 /// Longest link received (a SLURL is far shorter).
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 const MAX_URL: usize = 8 * 1024;
 
 #[cfg(target_os = "linux")]
 pub use bus::hand_off;
 
+/// macOS delivers a link to the running application as an Apple Event
+/// (`listen`), so there is no second process to hand it to. A `-url` on
+/// the command line still starts this process with the link.
 #[cfg(not(any(windows, target_os = "linux")))]
 pub fn hand_off(_url: &str) -> bool {
     false
@@ -63,7 +72,12 @@ pub fn window_ready(_window: &std::sync::Arc<winit::window::Window>) {}
 #[cfg(not(windows))]
 pub fn focused() {}
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::listen;
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn listen() -> Option<Receiver<String>> {
     None
 }

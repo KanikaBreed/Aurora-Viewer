@@ -2662,6 +2662,7 @@ ui-options-slurl-links = Second Lifeリンク
 ui-options-slurl-links-open = SlurlとHypergridリンクをAuroraで開く
 ui-options-slurl-links-open-help = このユーザの secondlife://、hop://、x-grid-location-info:// を登録します。ログイン前は場所からグリッドと開始地点を選択し、ワールド内では詳細を開きます。
 ui-options-slurl-links-other = これらのリンクは現在{ $program }で開きます。
+ui-options-slurl-links-kept = macOSでは、アプリからこれらのリンクを手放せません。別のビューアが自分の設定で受け取れます。
 ui-options-backup = バックアップ
 ui-options-backup-save = 設定をバックアップ
 ui-options-backup-save-help = 初期設定、色、ショートカット、バー、ウィンドウのレイアウト、スキン、および各アカウントの設定ファイル（コンタクトセット、ボイス音量、ブロックしたアセットなど）を１つのファイルに保存します。リセット後や別のＰＣで復元できます。ログイン情報とGIFサービスのキーは含まれません。

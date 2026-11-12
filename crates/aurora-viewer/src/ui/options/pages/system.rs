@@ -81,12 +81,22 @@ pub fn page(cx: &mut Cx) {
             if let Handler::Other(program) = &handler {
                 cx.note(&tr!("ui-options-slurl-links-other", program = program.clone()));
             }
+            // macOS cannot clear a default an app holds (no
+            // counterpart of the Windows class delete or the Linux
+            // mimeapps edit). The switch stays on, with the reason.
+            let kept = cfg!(target_os = "macos") && handler == Handler::This;
+            if kept {
+                cx.note(tr!("ui-options-slurl-links-kept"));
+            }
             cx.row(
                 tr!("ui-options-slurl-links-open"),
                 tr!("ui-options-slurl-links-open-help"),
                 &Nothing,
                 |ui, _| {
                     let mut on = handler == Handler::This;
+                    if kept {
+                        ui.disable();
+                    }
                     if super::super::toggle(ui, &p, &mut on) {
                         let done = if on {
                             crate::url_scheme::register()

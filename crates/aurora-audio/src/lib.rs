@@ -41,6 +41,7 @@ mod playlist;
 mod processing;
 mod resample;
 mod reverb;
+mod stall;
 mod stream;
 mod wind;
 

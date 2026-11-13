@@ -28,6 +28,7 @@ use crate::devices::{self, Direction};
 use crate::mixer::ENGINE_SAMPLE_RATE;
 use crate::processing::{BLOCK, EchoReference, MicProcessing, Processor};
 use crate::resample::Resampler;
+use crate::stall::{self, CallbackSeen};
 
 /// Sample rate of the captured audio (mono).
 pub const CAPTURE_SAMPLE_RATE: u32 = ENGINE_SAMPLE_RATE;
@@ -495,12 +496,17 @@ fn capture_main(
     let mut input = [0.0; BLOCK];
     let mut output = [0.0; BLOCK];
     let mut fill = 0;
+    // Same stall rule as the output. The microphone stream exists only while
+    // voice wants samples, so a callback is expected the whole time it is open.
+    let mut stall_watch = stall::StallWatch::new();
     loop {
         let mut reopen_now = false;
+        stall_watch.begin_open();
         let (raw_prod, mut raw_cons) = rtrb::RingBuffer::new(RING_SAMPLES);
         let raw_prod = Arc::new(Mutex::new(raw_prod));
         match open_input(&raw_prod, wanted.as_deref(), &shared) {
-            Ok((stream, name, fallback, failed, device)) => {
+            Ok((stream, name, fallback, failed, device, seen)) => {
+                stall_watch.opened();
                 log::info!("audio input: {name}");
                 warned = false;
                 *shared.device.lock() = name;
@@ -559,6 +565,21 @@ fn capture_main(
                                 log::warn!("audio input lost; reopening the device");
                                 break;
                             }
+                            // No data callback: the endpoint is gone and cpal
+                            // will not say so. Same rule as the output.
+                            // Legacy Viewer: `systemCallback`
+                            // (indra/llaudio/llaudioengine_fmodstudio.cpp) on
+                            // FMOD_SYSTEM_CALLBACK_DEVICELISTCHANGED.
+                            if let Some(reopen) = stall_watch.poll(&seen, true) {
+                                let secs = reopen.silent.as_secs_f32();
+                                if reopen.log {
+                                    log::warn!("audio input: no data callback for {secs:.1} s; reopening the device");
+                                } else {
+                                    log::debug!("audio input: still no data callback after {secs:.1} s; reopening the device");
+                                }
+                                reopen_now = true;
+                                break;
+                            }
                             // No data for 250 ms: the meter must not freeze.
                             if last_check.elapsed() >= Duration::from_millis(250) {
                                 let now = shared.captured.load(Ordering::Relaxed);
@@ -612,19 +633,26 @@ fn capture_main(
     }
 }
 
-type Opened = (cpal::Stream, String, bool, Arc<AtomicBool>, cpal::Device);
+type Opened = (cpal::Stream, String, bool, Arc<AtomicBool>, cpal::Device, Arc<CallbackSeen>);
 
 /// Opens `name` (or the default input). A named device that is missing or
 /// fails to open falls back to the default one.
 fn open_input(writer: &Arc<Mutex<rtrb::Producer<f32>>>, name: Option<&str>, shared: &Arc<MicShared>) -> Result<Opened, AudioError> {
     let picked = devices::pick(Direction::Input, name).ok_or(AudioError::NoDevice)?;
     match open_input_device(writer, &picked.device, shared) {
-        Ok((stream, failed)) => Ok((stream, devices::device_name(&picked.device), picked.fallback, failed, picked.device)),
+        Ok((stream, failed, seen)) => Ok((
+            stream,
+            devices::device_name(&picked.device),
+            picked.fallback,
+            failed,
+            picked.device,
+            seen,
+        )),
         Err(e) if name.is_some() && !picked.fallback => {
             log::warn!("audio input device {name:?} cannot be opened ({e}); using the default");
             let picked = devices::pick(Direction::Input, None).ok_or(AudioError::NoDevice)?;
-            let (stream, failed) = open_input_device(writer, &picked.device, shared)?;
-            Ok((stream, devices::device_name(&picked.device), true, failed, picked.device))
+            let (stream, failed, seen) = open_input_device(writer, &picked.device, shared)?;
+            Ok((stream, devices::device_name(&picked.device), true, failed, picked.device, seen))
         }
         Err(e) => Err(e),
     }
@@ -634,7 +662,7 @@ fn open_input_device(
     writer: &Arc<Mutex<rtrb::Producer<f32>>>,
     device: &cpal::Device,
     shared: &Arc<MicShared>,
-) -> Result<(cpal::Stream, Arc<AtomicBool>), AudioError> {
+) -> Result<(cpal::Stream, Arc<AtomicBool>, Arc<CallbackSeen>), AudioError> {
     let supported = device.default_input_config().map_err(|e| AudioError::Device(e.to_string()))?;
     let mut config = supported.config();
     if devices::is_pulse(device) {
@@ -642,20 +670,22 @@ fn open_input_device(
         config.buffer_size = cpal::BufferSize::Fixed(frames.max(1));
     }
     let failed = Arc::new(AtomicBool::new(false));
+    let seen = Arc::new(CallbackSeen::new());
     let stream = match supported.sample_format() {
-        SampleFormat::F32 => build_input::<f32>(device, &config, writer, &failed, shared),
-        SampleFormat::I16 => build_input::<i16>(device, &config, writer, &failed, shared),
-        SampleFormat::U16 => build_input::<u16>(device, &config, writer, &failed, shared),
-        SampleFormat::I32 => build_input::<i32>(device, &config, writer, &failed, shared),
+        SampleFormat::F32 => build_input::<f32>(device, &config, writer, &failed, &seen, shared),
+        SampleFormat::I16 => build_input::<i16>(device, &config, writer, &failed, &seen, shared),
+        SampleFormat::U16 => build_input::<u16>(device, &config, writer, &failed, &seen, shared),
+        SampleFormat::I32 => build_input::<i32>(device, &config, writer, &failed, &seen, shared),
         // The PulseAudio host reports 24-bit sources (s24le, s24-32le) as I24.
-        SampleFormat::I24 => build_input::<cpal::I24>(device, &config, writer, &failed, shared),
-        SampleFormat::F64 => build_input::<f64>(device, &config, writer, &failed, shared),
-        SampleFormat::I8 => build_input::<i8>(device, &config, writer, &failed, shared),
-        SampleFormat::U8 => build_input::<u8>(device, &config, writer, &failed, shared),
+        SampleFormat::I24 => build_input::<cpal::I24>(device, &config, writer, &failed, &seen, shared),
+        SampleFormat::F64 => build_input::<f64>(device, &config, writer, &failed, &seen, shared),
+        SampleFormat::I8 => build_input::<i8>(device, &config, writer, &failed, &seen, shared),
+        SampleFormat::U8 => build_input::<u8>(device, &config, writer, &failed, &seen, shared),
         other => Err(AudioError::Device(format!("unsupported input sample format {other:?}"))),
     }?;
     stream.play().map_err(|e| AudioError::Device(e.to_string()))?;
-    Ok((stream, failed))
+    seen.arm();
+    Ok((stream, failed, seen))
 }
 
 fn build_input<T>(
@@ -663,6 +693,7 @@ fn build_input<T>(
     config: &cpal::StreamConfig,
     writer: &Arc<Mutex<rtrb::Producer<f32>>>,
     failed: &Arc<AtomicBool>,
+    seen: &Arc<CallbackSeen>,
     shared: &Arc<MicShared>,
 ) -> Result<cpal::Stream, AudioError>
 where
@@ -672,11 +703,13 @@ where
     let mut adapter = InputAdapter::new(config.sample_rate, usize::from(config.channels));
     let writer = writer.clone();
     let failed = failed.clone();
+    let seen = seen.clone();
     let shared = shared.clone();
     device
         .build_input_stream::<T, _, _>(
             *config,
             move |data: &[T], info| {
+                seen.mark();
                 let timestamp = info.timestamp();
                 shared.capture_delay_ms.store(
                     timestamp.callback.duration_since(timestamp.capture).as_millis().min(500) as u32,

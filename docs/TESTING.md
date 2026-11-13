@@ -10515,6 +10515,8 @@ What the inventory must show with these scenarios:
 
 ### Details
 
+- **Windows audio services restart (#3444)**: a Windows grid/device check, not a new demo. There is no `AURORA_DEMO_*` switch and no simulated device. Play a sound and use voice, restart Windows Audio Endpoint Builder and Windows Audio, and both should come back within a few seconds without restarting the viewer. A healthy device on Linux is unchanged.
+
 - **`AURORA_DEMO_MINIMIZED_MUTE=1|off`**: overrides the Sound preference
   for this offline launch. Combine with `AURORA_DEMO_SOUND=1` for the
   looping world chime, or with local parcel/prim media or a chat video.

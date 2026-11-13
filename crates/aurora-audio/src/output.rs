@@ -20,6 +20,7 @@ use crate::devices::{self, Direction};
 use crate::mixer::{ENGINE_CHANNELS, ENGINE_SAMPLE_RATE, Mixer};
 use crate::processing::{EchoReference, RenderTap};
 use crate::resample::Resampler;
+use crate::stall::{self, CallbackSeen};
 
 /// Description of the opened output device.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -208,10 +209,15 @@ fn output_main(
     reference: EchoReference,
 ) {
     let mut ready = Some(ready_tx);
+    // Across reopens: a stall waits longer each time it still hears nothing,
+    // and is logged once until a callback shows the device came back.
+    let mut stall_watch = stall::StallWatch::new();
     loop {
         let mut reopen_now = false;
+        stall_watch.begin_open();
         match open_stream(&mixer, wanted.as_deref(), &reference) {
-            Ok((stream, new_info, health, device)) => {
+            Ok((stream, new_info, health, device, seen)) => {
+                stall_watch.opened();
                 log::info!(
                     "audio output: {} ({} Hz, {} ch)",
                     new_info.device_name,
@@ -257,6 +263,28 @@ fn output_main(
                                 log::warn!("audio output lost; reopening the device");
                                 break;
                             }
+                            // No data callback while something is playing: the
+                            // endpoint is gone and cpal will not say so. Drop
+                            // the stream (that wakes its thread) and open the
+                            // current device. Legacy Viewer: `systemCallback`
+                            // (indra/llaudio/llaudioengine_fmodstudio.cpp) on
+                            // FMOD_SYSTEM_CALLBACK_DEVICELISTCHANGED.
+                            let since = seen.since();
+                            let playing = if stall::stream_callback_stalled(since, true, stall_watch.backoff()) {
+                                mixer.lock().is_playing()
+                            } else {
+                                false
+                            };
+                            if let Some(reopen) = stall_watch.poll(&seen, playing) {
+                                let secs = reopen.silent.as_secs_f32();
+                                if reopen.log {
+                                    log::warn!("audio output: no data callback for {secs:.1} s; reopening the device");
+                                } else {
+                                    log::debug!("audio output: still no data callback after {secs:.1} s; reopening the device");
+                                }
+                                reopen_now = true;
+                                break;
+                            }
                         }
                         Err(RecvTimeoutError::Disconnected) => return,
                     }
@@ -291,19 +319,19 @@ fn open_stream(
     mixer: &Arc<Mutex<Mixer>>,
     name: Option<&str>,
     reference: &EchoReference,
-) -> Result<(cpal::Stream, OutputInfo, Arc<StreamHealth>, cpal::Device), AudioError> {
+) -> Result<(cpal::Stream, OutputInfo, Arc<StreamHealth>, cpal::Device, Arc<CallbackSeen>), AudioError> {
     let picked = devices::pick(Direction::Output, name).ok_or(AudioError::NoDevice)?;
     match open_device(mixer, &picked.device, reference) {
-        Ok((stream, mut info, health)) => {
+        Ok((stream, mut info, health, seen)) => {
             info.fallback = picked.fallback;
-            Ok((stream, info, health, picked.device))
+            Ok((stream, info, health, picked.device, seen))
         }
         Err(e) if name.is_some() && !picked.fallback => {
             log::warn!("audio output device {name:?} cannot be opened ({e}); using the default");
             let picked = devices::pick(Direction::Output, None).ok_or(AudioError::NoDevice)?;
-            let (stream, mut info, health) = open_device(mixer, &picked.device, reference)?;
+            let (stream, mut info, health, seen) = open_device(mixer, &picked.device, reference)?;
             info.fallback = true;
-            Ok((stream, info, health, picked.device))
+            Ok((stream, info, health, picked.device, seen))
         }
         Err(e) => Err(e),
     }
@@ -313,7 +341,7 @@ fn open_device(
     mixer: &Arc<Mutex<Mixer>>,
     device: &cpal::Device,
     reference: &EchoReference,
-) -> Result<(cpal::Stream, OutputInfo, Arc<StreamHealth>), AudioError> {
+) -> Result<(cpal::Stream, OutputInfo, Arc<StreamHealth>, Arc<CallbackSeen>), AudioError> {
     let supported = device.default_output_config().map_err(|e| AudioError::Device(e.to_string()))?;
     let mut config = supported.config();
     let queued;
@@ -323,26 +351,29 @@ fn open_device(
         output_buffer(config.sample_rate)
     };
     let health = Arc::new(StreamHealth::new(queued));
+    let seen = Arc::new(CallbackSeen::new());
     let stream = match supported.sample_format() {
-        SampleFormat::F32 => build::<f32>(device, &config, mixer, &health, reference),
-        SampleFormat::I16 => build::<i16>(device, &config, mixer, &health, reference),
-        SampleFormat::U16 => build::<u16>(device, &config, mixer, &health, reference),
-        SampleFormat::I32 => build::<i32>(device, &config, mixer, &health, reference),
+        SampleFormat::F32 => build::<f32>(device, &config, mixer, &health, &seen, reference),
+        SampleFormat::I16 => build::<i16>(device, &config, mixer, &health, &seen, reference),
+        SampleFormat::U16 => build::<u16>(device, &config, mixer, &health, &seen, reference),
+        SampleFormat::I32 => build::<i32>(device, &config, mixer, &health, &seen, reference),
         // The PulseAudio host reports 24-bit sinks (s24le, s24-32le) as I24.
-        SampleFormat::I24 => build::<cpal::I24>(device, &config, mixer, &health, reference),
-        SampleFormat::F64 => build::<f64>(device, &config, mixer, &health, reference),
-        SampleFormat::I8 => build::<i8>(device, &config, mixer, &health, reference),
-        SampleFormat::U8 => build::<u8>(device, &config, mixer, &health, reference),
+        SampleFormat::I24 => build::<cpal::I24>(device, &config, mixer, &health, &seen, reference),
+        SampleFormat::F64 => build::<f64>(device, &config, mixer, &health, &seen, reference),
+        SampleFormat::I8 => build::<i8>(device, &config, mixer, &health, &seen, reference),
+        SampleFormat::U8 => build::<u8>(device, &config, mixer, &health, &seen, reference),
         other => Err(AudioError::Device(format!("unsupported device sample format {other:?}"))),
     }?;
     stream.play().map_err(|e| AudioError::Device(e.to_string()))?;
+    // Opening the device can take a while; silence is measured from here.
+    seen.arm();
     let info = OutputInfo {
         device_name: devices::device_name(device),
         sample_rate: config.sample_rate,
         channels: config.channels,
         fallback: false,
     };
-    Ok((stream, info, health))
+    Ok((stream, info, health, seen))
 }
 
 fn build<T>(
@@ -350,6 +381,7 @@ fn build<T>(
     config: &cpal::StreamConfig,
     mixer: &Arc<Mutex<Mixer>>,
     health: &Arc<StreamHealth>,
+    seen: &Arc<CallbackSeen>,
     reference: &EchoReference,
 ) -> Result<cpal::Stream, AudioError>
 where
@@ -361,12 +393,14 @@ where
     let mixer = mixer.clone();
     let health = health.clone();
     let callback_health = health.clone();
+    let seen = seen.clone();
     let (rate, channels) = (config.sample_rate, usize::from(config.channels).max(1));
     let mut previous = None;
     device
         .build_output_stream::<T, _, _>(
             *config,
             move |data: &mut [T], info| {
+                seen.mark();
                 let start = Instant::now();
                 let timestamp = info.timestamp();
                 let delay = timestamp.playback.duration_since(timestamp.callback).as_millis().min(500) as i32;

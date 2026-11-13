@@ -1023,6 +1023,19 @@ impl Mixer {
         }
     }
 
+    /// Whether a data callback is expected to keep rendering. A command still
+    /// queued counts: the callback applies it, so a sound started while the
+    /// callback has stopped is playing too. An idle mixer is not (reverb
+    /// merely switched on does not count), so a healthy device that has
+    /// stopped being asked for silence is left alone.
+    pub(crate) fn is_playing(&self) -> bool {
+        !self.pcm.is_empty()
+            || !self.clips.is_empty()
+            || !self.world.is_empty()
+            || !self.cmd_rx.is_empty()
+            || self.params.wind.get().gain > 0.0
+    }
+
     /// The final mix with the reverb: the buses as without it, the sends
     /// summed at their channels' volumes into the reverb, its output at the
     /// master volume, then the clamp.

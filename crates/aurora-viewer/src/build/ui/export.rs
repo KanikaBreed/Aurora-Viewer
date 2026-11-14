@@ -32,6 +32,9 @@ pub struct Summary {
     /// Prims with a volume in the selection, and those we may export.
     pub total: usize,
     pub allowed: usize,
+    /// PBR materials of the exportable prims, and those we may write (glTF).
+    pub materials_total: usize,
+    pub materials: usize,
     /// Some prims still wait for their properties or their shape.
     pub waiting: bool,
     /// Textures of the exportable prims, and those we may save, with the
@@ -130,6 +133,16 @@ impl ExportWindow {
                         p,
                         &aurora_i18n::tr!("object-export-textures", count = s.textures.len(), total = s.textures_total),
                     );
+                    if s.materials_total > 0 {
+                        common::text(
+                            ui,
+                            p,
+                            &aurora_i18n::tr!("object-export-materials", count = s.materials, total = s.materials_total),
+                        );
+                        if settings.format != Format::Gltf {
+                            common::small(ui, p, aurora_i18n::tr!("object-export-materials-gltf-only"));
+                        }
+                    }
                     if s.waiting {
                         common::small(ui, p, aurora_i18n::tr!("object-export-waiting"));
                     } else if s.allowed == 0 {

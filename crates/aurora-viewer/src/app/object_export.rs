@@ -29,6 +29,9 @@ const ASK_AGAIN: Duration = Duration::from_secs(10);
 const COMMENT_WAIT: Duration = Duration::from_secs(15);
 /// The shapes not held by then are left out of the file.
 const SHAPES_WAIT: Duration = Duration::from_secs(30);
+/// A face's PBR material not loaded by then is written with its texture
+/// entry, as the other formats do.
+const MATERIAL_WAIT: Duration = Duration::from_secs(15);
 
 /// The export's state on the app's side.
 #[derive(Default)]
@@ -39,6 +42,9 @@ pub(super) struct Job {
     allowed: Vec<ObjKey>,
     /// The textures we may save and their file names.
     files: Vec<(Uuid, String)>,
+    /// The PBR materials of the prims we may export, and the name each is
+    /// written under when the rights let it be (glTF).
+    materials: HashMap<Uuid, Option<String>>,
     /// Texture and sculpt map uploaders read from their J2C comments
     /// (None: no comment, or not read in time).
     comments: HashMap<Uuid, Option<Uuid>>,
@@ -172,10 +178,10 @@ impl App {
         job.refreshed = Some(now);
         self.collect_comments(now);
         let grid = self.export_grid();
-        let props = |id: Uuid| self.object_export_props(id);
         // every texture and sculpt map of the selection, its items read in
         // one pass of the inventory
-        let assets: HashSet<Uuid> = self
+        let gltf = self.settings.build.export.format == crate::build::export::Format::Gltf;
+        let mut assets: HashSet<Uuid> = self
             .object_export_job
             .prims
             .iter()
@@ -183,9 +189,17 @@ impl App {
             .flat_map(|o| {
                 let map = o.volume.sculpt.filter(|s| !s.is_mesh()).map(|s| s.texture);
                 let faces = o.te.iter().flat_map(|te| te.faces.iter().map(|f| f.texture));
-                map.into_iter().chain(faces)
+                let materials = o.extra.render_materials.iter().map(|(_, id)| *id);
+                map.into_iter().chain(faces).chain(materials)
             })
             .collect();
+        // the textures of the faces' PBR materials as drawn (glTF writes them)
+        if gltf {
+            for key in self.object_export_job.prims.clone() {
+                assets.extend(face_pbr_textures(&self.world, &mut self.scene.materials, key, None));
+            }
+        }
+        let props = |id: Uuid| self.object_export_props(id);
         let cx = Context::new(
             self.world.agent_id,
             grid,
@@ -246,6 +260,15 @@ impl App {
                 allowed.push(*key);
             }
         }
+        // the PBR materials of the prims we may export, and their rights
+        let mut materials: HashMap<Uuid, Option<String>> = HashMap::new();
+        for key in &allowed {
+            if let Some(o) = self.world.objects.index_of(key).and_then(|i| self.world.objects.get(i)) {
+                for (_, id) in o.extra.render_materials.iter().filter(|(_, id)| !id.is_nil()) {
+                    materials.entry(*id).or_insert_with(|| rights::material(&cx, *id));
+                }
+            }
+        }
         // the textures of the prims we may export (updateTextureInfo)
         let mut textures: Vec<Uuid> = Vec::new();
         for key in &allowed {
@@ -266,6 +289,16 @@ impl App {
         }
         let mut files = Vec::new();
         let mut unread = Vec::new();
+        // glTF: the textures of the PBR materials it may write
+        if gltf {
+            for key in allowed.clone() {
+                for id in face_pbr_textures(&self.world, &mut self.scene.materials, key, Some(&materials)) {
+                    if !textures.contains(&id) {
+                        textures.push(id);
+                    }
+                }
+            }
+        }
         for id in &textures {
             let uploader = match self.object_export_job.comments.get(id) {
                 Some(u) => *u,
@@ -281,6 +314,8 @@ impl App {
         let summary = Summary {
             total,
             allowed: allowed.len(),
+            materials_total: materials.len(),
+            materials: materials.values().filter(|m| m.is_some()).count(),
             waiting,
             textures_total: textures.len(),
             textures: {
@@ -310,6 +345,7 @@ impl App {
         let job = &mut self.object_export_job;
         job.allowed = allowed;
         job.files = files;
+        job.materials = materials;
         // the comments matter on Second Life only
         let comments_wanted: Vec<Uuid> = if grid == ExportGrid::SecondLife {
             maps.into_iter().chain(unread).collect()
@@ -335,6 +371,50 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Fill a prim's PBR faces for a glTF file: each face whose material
+    /// the rights let through, as drawn (scene::meshes::render_material: the
+    /// asset, its override on top), without the textures the rights do not
+    /// let through. False while a material is still loading, until `waited`
+    /// (then the face keeps its texture entry).
+    fn export_resolve_pbr(&mut self, key: ObjKey, input: &mut PrimInput, waited: bool) -> bool {
+        use crate::scene::meshes::MaterialStatus;
+        let allowed_textures: HashSet<Uuid> = self.object_export_job.files.iter().map(|(id, _)| *id).collect();
+        let overrides = self.world.gltf_overrides.get(&key).cloned();
+        let mut ready = true;
+        for (face, id) in input.materials.clone().into_iter().enumerate() {
+            let Some(id) = id else { continue };
+            let Some(Some(name)) = self.object_export_job.materials.get(&id).cloned() else {
+                continue;
+            };
+            let status = self.scene.materials.resolve(&id);
+            if matches!(status, MaterialStatus::Pending) && !waited {
+                ready = false;
+                continue;
+            }
+            if !matches!(status, MaterialStatus::Loaded(_)) {
+                continue;
+            }
+            let ov = overrides
+                .as_ref()
+                .and_then(|o| o.iter().find(|(f, _)| *f as usize == face).map(|(_, ov)| ov));
+            let mut material = crate::scene::meshes::render_material(&status, ov);
+            for slot in [
+                &mut material.base_color_texture,
+                &mut material.normal_texture,
+                &mut material.metallic_roughness_texture,
+                &mut material.emissive_texture,
+            ] {
+                if slot.is_some_and(|t| !allowed_textures.contains(&t)) {
+                    *slot = None;
+                }
+            }
+            if let Some(out) = input.pbr.get_mut(face) {
+                *out = Some(std::sync::Arc::new(crate::build::export::model::Pbr { name, material }));
+            }
+        }
+        ready
     }
 
     /// Read a texture's J2C comment (its uploader, "a=") on a worker once
@@ -452,11 +532,15 @@ impl App {
                 Err(crossbeam_channel::TryRecvError::Empty) => Stage::Choosing(rx),
             },
             Stage::Gathering { path, since, mut inputs } => {
+                let gltf = self.settings.build.export.format == Format::Gltf;
+                let waited = now.duration_since(since) > MATERIAL_WAIT;
                 for key in self.object_export_job.allowed.clone() {
                     if inputs.contains_key(&key) {
                         continue;
                     }
-                    if let Ok(input) = gather::input(&self.world, &mut self.scene, key, now) {
+                    if let Ok(mut input) = gather::input(&self.world, &mut self.scene, key, now)
+                        && (!gltf || self.export_resolve_pbr(key, &mut input, waited))
+                    {
                         inputs.insert(key, input);
                     }
                 }
@@ -686,6 +770,9 @@ impl App {
                 }
                 let parent = self.world.inventory.root;
                 self.world.inventory.add_items(fixture::inventory_items(parent));
+                for (id, material) in fixture::materials() {
+                    self.scene.materials.insert(id, material);
+                }
                 log::info!("demo object export: lamp at {at:?}");
             }
             700 => {
@@ -702,11 +789,13 @@ impl App {
                     && matches!(self.object_export_job.stage, Stage::Idle)
                 {
                     log::info!(
-                        "demo object export: {}/{} prims, {}/{} textures, saving",
+                        "demo object export: {}/{} prims, {}/{} textures, {}/{} PBR materials, saving",
                         self.object_export.summary.allowed,
                         self.object_export.summary.total,
                         self.object_export.summary.textures.len(),
-                        self.object_export.summary.textures_total
+                        self.object_export.summary.textures_total,
+                        self.object_export.summary.materials,
+                        self.object_export.summary.materials_total
                     );
                     self.object_export_job.stage = Stage::Gathering {
                         path,
@@ -719,4 +808,46 @@ impl App {
             _ => {}
         }
     }
+}
+
+/// The textures a PBR material draws.
+fn pbr_texture_ids(m: &aurora_assets::material::PbrMaterial) -> impl Iterator<Item = Uuid> + use<> {
+    [
+        m.base_color_texture,
+        m.normal_texture,
+        m.metallic_roughness_texture,
+        m.emissive_texture,
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|t| !t.is_nil())
+}
+
+/// The textures a prim's PBR faces draw (their materials as drawn, with
+/// their overrides): every material when `allowed` is None (the rule's
+/// context needs them all), else only those it names. A material not
+/// loaded yet is asked for and left out until it comes.
+fn face_pbr_textures(
+    world: &crate::world::World,
+    streamer: &mut crate::scene::meshes::MaterialStreamer,
+    key: ObjKey,
+    allowed: Option<&HashMap<Uuid, Option<String>>>,
+) -> Vec<Uuid> {
+    let Some(o) = world.objects.index_of(&key).and_then(|i| world.objects.get(i)) else {
+        return Vec::new();
+    };
+    let overrides = world.gltf_overrides.get(&key);
+    let mut out = Vec::new();
+    for (face, id) in o.extra.render_materials.iter().filter(|(_, id)| !id.is_nil()) {
+        if allowed.is_some_and(|a| !a.get(id).is_some_and(Option::is_some)) {
+            continue;
+        }
+        let status = streamer.resolve(id);
+        if !matches!(status, crate::scene::meshes::MaterialStatus::Loaded(_)) {
+            continue;
+        }
+        let ov = overrides.and_then(|o| o.iter().find(|(f, _)| f == face).map(|(_, ov)| ov));
+        out.extend(pbr_texture_ids(&crate::scene::meshes::render_material(&status, ov)));
+    }
+    out
 }

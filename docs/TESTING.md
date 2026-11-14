@@ -3485,7 +3485,12 @@ textures, saving", then "object export: 3 prims, 858 triangles, 3 materials"
 and "saved"; `<path>` (and its `.mtl` for OBJ) and `Garden_tiles.png` are
 written beside it, and a notification names the file. With `gltf`, the
 tiles are fetched first ("Saving textures") and written inside `<path>`
-(a single `.glb`, nothing beside it). Import the file in Blender: the lamp
+(a single `.glb`, nothing beside it). The post bears a PBR material we made
+("Brushed steel": metallic, the tiles as its base colour map repeated four
+times up the post by a texture transform) and the globe one we bought, so
+the window also reads "Exportable PBR materials: 1/2"; in glTF the post is
+written with its PBR material (a Mapping node in Blender for the repeat),
+the globe with its texture entry's colour. Import the file in Blender: the lamp
 stands upright on its base (Collada is Z up, OBJ and glTF Y up), the tiles on
 the base, the globe and the post in their face colours. On the grid, the human compares with the Legacy Viewer's Save as ›
 Collada on an object of their own (prim, sculpt and mesh), on a bought one

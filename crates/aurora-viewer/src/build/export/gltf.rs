@@ -13,6 +13,10 @@
 //!   it; BLEND when the colour or the texture has transparency;
 //! - the textures embedded as PNG in the file's binary chunk, by the name
 //!   their item gives them (never their id);
+//! - a face's PBR material written whole (`pbr_material`): its factors,
+//!   base colour, normal, metallic-roughness (also as occlusion) and
+//!   emissive maps, alpha mode and cutoff, double-sidedness, and its texture
+//!   transforms as KHR_texture_transform; the textures only when allowed;
 //! - a rigged mesh with its rigging (Aurora's own: the Legacy Viewer's
 //!   Collada export writes none): one skeleton for the file, the joints the
 //!   rigged meshes use and their parents in avatar_skeleton.xml's tree, a
@@ -247,10 +251,14 @@ pub fn write_glb(model: &Model, textures: &TextureFiles, images: &HashMap<Uuid, 
         }
     }
 
+    let mut transforms_used = false;
     let materials: Vec<Value> = model
         .materials
         .iter()
         .map(|m| {
+            if let Some(pbr) = &m.pbr {
+                return pbr_material(pbr, &texture_index, &mut transforms_used);
+            }
             let [r, g, b, a] = m.color;
             let mut pbr = json!({
                 "baseColorFactor": [srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b), a.clamp(0.0, 1.0)],
@@ -452,10 +460,69 @@ pub fn write_glb(model: &Model, textures: &TextureFiles, images: &HashMap<Uuid, 
     set("images", gltf_images);
     set("textures", gltf_textures);
     set("skins", gltf_skins);
+    if transforms_used {
+        doc["extensionsUsed"] = json!(["KHR_texture_transform"]);
+    }
     if !buffer.bytes.is_empty() {
         doc["buffers"] = json!([{ "byteLength": buffer.bytes.len() }]);
     }
     glb(&doc, buffer.bytes)
+}
+
+/// A face's PBR material as glTF writes it: the SL material asset is a
+/// glTF material already (LLGLTFMaterial; its factors linear, its texture
+/// transforms KHR_texture_transform's), so its values go across as they are,
+/// as LLMaterialEditor::getEncodedAsset writes them (the metallic-roughness
+/// map also as the occlusion map). A texture the file does not hold (not
+/// allowed, or not arrived) is left out and its factor stays.
+fn pbr_material(pbr: &super::model::Pbr, texture_index: &HashMap<Uuid, (usize, bool)>, transforms_used: &mut bool) -> Value {
+    use aurora_assets::material::{AlphaMode, TextureTransform};
+    let m = &pbr.material;
+    let mut slot = |id: Option<Uuid>, transform: TextureTransform| -> Option<Value> {
+        let (index, _) = texture_index.get(&id?)?;
+        let mut info = json!({ "index": index });
+        if transform != TextureTransform::default() {
+            *transforms_used = true;
+            info["extensions"] = json!({ "KHR_texture_transform": {
+                "offset": transform.offset, "scale": transform.scale, "rotation": transform.rotation } });
+        }
+        Some(info)
+    };
+    let base = slot(m.base_color_texture, m.transforms[0]);
+    let normal = slot(m.normal_texture, m.transforms[1]);
+    let orm = slot(m.metallic_roughness_texture, m.transforms[2]);
+    let emissive = slot(m.emissive_texture, m.transforms[3]);
+    let mut metal = json!({
+        "baseColorFactor": m.base_color_factor,
+        "metallicFactor": m.metallic_factor,
+        "roughnessFactor": m.roughness_factor,
+    });
+    if let Some(info) = base {
+        metal["baseColorTexture"] = info;
+    }
+    if let Some(info) = &orm {
+        metal["metallicRoughnessTexture"] = info.clone();
+    }
+    let mut out = json!({
+        "name": pbr.name,
+        "pbrMetallicRoughness": metal,
+        "emissiveFactor": m.emissive_factor,
+        "alphaMode": match m.alpha_mode {
+            AlphaMode::Opaque => "OPAQUE",
+            AlphaMode::Blend => "BLEND",
+            AlphaMode::Mask => "MASK",
+        },
+        "doubleSided": m.double_sided,
+    });
+    if m.alpha_mode == AlphaMode::Mask {
+        out["alphaCutoff"] = json!(m.alpha_cutoff);
+    }
+    for (key, info) in [("normalTexture", normal), ("occlusionTexture", orm), ("emissiveTexture", emissive)] {
+        if let Some(info) = info {
+            out[key] = info;
+        }
+    }
+    out
 }
 
 /// The binary container: header, JSON chunk (space padded), BIN chunk (zero
@@ -697,6 +764,7 @@ mod tests {
             },
             joints: vec![[0, 1, 0, 0], [0, 0, 0, 0], [1, 0, 0, 0]],
             weights: vec![[0.5, 0.5, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+            pbr: None,
         };
         let rigged = SourcePrim {
             position: Vec3::new(10.0, 10.0, 20.0),
@@ -876,6 +944,138 @@ mod tests {
         ];
         expected.sort();
         assert_eq!(seen, expected);
+    }
+
+    /// A prim whose face carries a PBR material: an embedded base colour map
+    /// with a transform, a normal map the rights kept out, MASK at 0.3,
+    /// double-sided, a glow.
+    fn pbr_model() -> (Model, aurora_assets::material::PbrMaterial) {
+        use aurora_assets::material::{AlphaMode, PbrMaterial, TextureTransform};
+        let material = PbrMaterial {
+            base_color_factor: [0.8, 0.6, 0.4, 1.0],
+            base_color_texture: Some(Uuid::from_u128(1)),
+            metallic_factor: 0.7,
+            roughness_factor: 0.25,
+            metallic_roughness_texture: None,
+            normal_texture: Some(Uuid::from_u128(3)),
+            emissive_factor: [0.1, 0.2, 0.3],
+            emissive_texture: None,
+            alpha_mode: AlphaMode::Mask,
+            alpha_cutoff: 0.3,
+            double_sided: true,
+            transforms: [
+                TextureTransform {
+                    offset: [0.5, 0.25],
+                    scale: [2.0, 3.0],
+                    rotation: 0.5,
+                },
+                TextureTransform::default(),
+                TextureTransform::default(),
+                TextureTransform::default(),
+            ],
+        };
+        let face = SourceFace {
+            positions: vec![[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [0.0, 0.5, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            uvs: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            indices: vec![0, 1, 2],
+            te: TextureFace {
+                texture: Uuid::from_u128(9),
+                color: [1.0; 4],
+                ..Default::default()
+            },
+            pbr: Some(std::sync::Arc::new(super::super::model::Pbr {
+                name: "Brushed steel".into(),
+                material: material.clone(),
+            })),
+            ..Default::default()
+        };
+        let prim = SourcePrim {
+            position: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+            faces: vec![face],
+            skin: None,
+        };
+        (build(&[prim], &Settings::default()), material)
+    }
+
+    fn pbr_files() -> (TextureFiles, HashMap<Uuid, Embedded>) {
+        let mut files = TextureFiles {
+            extension: "png".into(),
+            ..Default::default()
+        };
+        files.names.insert(Uuid::from_u128(1), "Steel_base".into());
+        let images = HashMap::from([(
+            Uuid::from_u128(1),
+            Embedded {
+                png: vec![7; 8],
+                alpha: false,
+            },
+        )]);
+        (files, images)
+    }
+
+    #[test]
+    fn a_pbr_face_is_written_whole_with_its_transforms() {
+        let (pbr, _) = pbr_model();
+        let (files, images) = pbr_files();
+        let (doc, _) = read(&write_glb(&pbr, &files, &images, &Settings::default(), "Aurora"));
+        let m = &doc["materials"][0];
+        assert_eq!(m["name"], "Brushed steel", "named after its item");
+        let metal = &m["pbrMetallicRoughness"];
+        assert_eq!(
+            metal["baseColorFactor"],
+            json!([0.8f32, 0.6f32, 0.4f32, 1.0]),
+            "linear already: as it is"
+        );
+        assert_eq!(metal["metallicFactor"], json!(0.7f32));
+        assert_eq!(metal["roughnessFactor"], json!(0.25f32));
+        assert_eq!(metal["baseColorTexture"]["index"], 0);
+        let t = &metal["baseColorTexture"]["extensions"]["KHR_texture_transform"];
+        assert_eq!(t["offset"], json!([0.5f32, 0.25f32]));
+        assert_eq!(t["scale"], json!([2.0f32, 3.0f32]));
+        assert_eq!(t["rotation"], json!(0.5f32));
+        assert_eq!(doc["extensionsUsed"], json!(["KHR_texture_transform"]));
+        assert!(m.get("normalTexture").is_none(), "a texture the file does not hold is left out");
+        assert_eq!(m["emissiveFactor"], json!([0.1f32, 0.2f32, 0.3f32]));
+        assert_eq!(m["alphaMode"], "MASK");
+        assert_eq!(m["alphaCutoff"], json!(0.3f32));
+        assert_eq!(m["doubleSided"], true);
+        assert_eq!(doc["images"][0]["name"], "Steel_base");
+        // a model without transforms declares no extension
+        let (plain, _) = read(&write_glb(
+            &model(),
+            &TextureFiles::default(),
+            &HashMap::new(),
+            &Settings::default(),
+            "Aurora",
+        ));
+        assert!(plain.get("extensionsUsed").is_none());
+    }
+
+    #[test]
+    fn a_pbr_glb_reads_back_in_the_importer_with_the_same_material() {
+        use aurora_assets::material::AlphaMode;
+        let (model, written) = pbr_model();
+        let (files, images) = pbr_files();
+        let glb = write_glb(&model, &files, &images, &Settings::default(), "Aurora");
+        let doc = aurora_assets::import_gltf::Document::parse(&glb, |_| Err(aurora_assets::AssetError::invalid("no external file")))
+            .expect("the importer reads the file");
+        let scene = aurora_assets::import_mesh::gltf::parse(&doc, skeleton().expect("skeleton")).expect("the importer reads the scene");
+        let m = scene
+            .materials
+            .iter()
+            .find(|m| m.name == "Brushed steel")
+            .expect("the PBR material");
+        let v = &m.value;
+        assert_eq!(v.base_color_factor, written.base_color_factor);
+        assert_eq!((v.metallic_factor, v.roughness_factor), (0.7, 0.25));
+        assert_eq!(v.emissive_factor, written.emissive_factor);
+        assert_eq!((v.alpha_mode, v.alpha_cutoff, v.double_sided), (AlphaMode::Mask, 0.3, true));
+        assert_eq!(v.transforms[0], written.transforms[0], "the base colour map's transform comes back");
+        assert!(m.images[0].is_some(), "the base colour map is in the file");
+        assert!(m.images[1].is_none(), "the normal map the rights kept out is not");
     }
 
     #[test]

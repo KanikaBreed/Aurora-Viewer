@@ -6,6 +6,7 @@
 //! format it.
 
 use super::Settings;
+use aurora_assets::material::PbrMaterial;
 use aurora_assets::mesh::SkinInfo;
 use aurora_prim::te::{TRANSPARENT_TEXTURE, TextureFace};
 use glam::{Mat4, Quat, Vec2, Vec3};
@@ -25,6 +26,17 @@ pub struct SourceFace {
     /// weights; empty otherwise.
     pub joints: Vec<[u8; 4]>,
     pub weights: Vec<[f32; 4]>,
+    /// The face's PBR material as drawn (its override applied, the textures
+    /// the rights do not allow taken out), when it has one the rights let
+    /// through; a format that cannot carry it keeps the texture entry.
+    pub pbr: Option<Arc<Pbr>>,
+}
+
+/// A face's PBR material, named after the item that lets it be exported.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pbr {
+    pub name: String,
+    pub material: PbrMaterial,
 }
 
 /// A prim to write.
@@ -48,6 +60,9 @@ pub struct Material {
     pub texture: Uuid,
     /// The face's colour and alpha, as the texture entry holds them.
     pub color: [f32; 4],
+    /// The face's PBR material (glTF writes it; the other formats keep the
+    /// texture and colour).
+    pub pbr: Option<Arc<Pbr>>,
 }
 
 /// The triangles of a prim drawn with one material (a `<polylist>`).
@@ -129,7 +144,10 @@ pub fn build(prims: &[SourcePrim], settings: &Settings) -> Model {
             out.normals
                 .extend((0..count).map(|i| face.normals.get(i).copied().unwrap_or([0.0, 0.0, 1.0])));
             let uv = |i: usize| face.uvs.get(i).copied().unwrap_or([0.0, 0.0]);
-            if settings.texture_params {
+            // a PBR face takes its material's own transforms, never the
+            // texture entry's repeats (LLViewerObject: a glTF face ignores
+            // its texture entry's mapping)
+            if settings.texture_params && face.pbr.is_none() {
                 out.uvs.extend((0..count).map(|i| {
                     let normal = face.normals.get(i).copied().unwrap_or([0.0, 0.0, 1.0]);
                     transform_tex_coord(uv(i), face.positions[i], normal, &face.te, prim.scale)
@@ -151,7 +169,7 @@ pub fn build(prims: &[SourcePrim], settings: &Settings) -> Model {
                 .collect::<Vec<_>>();
             // whole triangles only
             let indices = indices[..indices.len() / 3 * 3].to_vec();
-            faces.push((material(&mut model.materials, &face.te, settings), indices));
+            faces.push((material(&mut model.materials, &face.te, &face.pbr, settings), indices));
         }
         if settings.consolidate {
             // one list per material, in the order its first face came
@@ -172,9 +190,11 @@ pub fn build(prims: &[SourcePrim], settings: &Settings) -> Model {
 
 /// getMaterial: with "Consolidate textures", faces of the same texture and
 /// colour share one material; without, each face has its own.
-fn material(materials: &mut Vec<Material>, te: &TextureFace, settings: &Settings) -> usize {
+fn material(materials: &mut Vec<Material>, te: &TextureFace, pbr: &Option<Arc<Pbr>>, settings: &Settings) -> usize {
     if settings.consolidate
-        && let Some(n) = materials.iter().position(|m| m.texture == te.texture && m.color == te.color)
+        && let Some(n) = materials
+            .iter()
+            .position(|m| m.texture == te.texture && m.color == te.color && m.pbr == *pbr)
     {
         return n;
     }
@@ -182,6 +202,7 @@ fn material(materials: &mut Vec<Material>, te: &TextureFace, settings: &Settings
         name: format!("Material{}", materials.len()),
         texture: te.texture,
         color: te.color,
+        pbr: pbr.clone(),
     });
     materials.len() - 1
 }
@@ -353,6 +374,35 @@ mod tests {
                 .skin
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_pbr_face_keeps_its_own_material_and_its_raw_texture_coordinates() {
+        let steel = Arc::new(Pbr {
+            name: "Steel".into(),
+            material: PbrMaterial {
+                metallic_factor: 0.8,
+                ..Default::default()
+            },
+        });
+        let repeated = TextureFace {
+            texture: Uuid::from_u128(1),
+            color: [1.0; 4],
+            scale_s: 3.0,
+            scale_t: 3.0,
+            ..Default::default()
+        };
+        let mut pbr_face = quad(repeated);
+        pbr_face.pbr = Some(steel.clone());
+        let faces = vec![pbr_face.clone(), quad(repeated), pbr_face];
+        let model = build(&[prim(Vec3::ZERO, faces)], &Settings::default());
+        assert_eq!(model.materials.len(), 2, "same texture and colour, but one is PBR");
+        assert_eq!(model.materials[0].pbr.as_ref(), Some(&steel));
+        assert!(model.materials[1].pbr.is_none());
+        assert_eq!(model.prims[0].groups[0].indices.len(), 12, "both PBR faces share it");
+        // the PBR face's coordinates as they are; the other one's repeated
+        assert_eq!(model.prims[0].uvs[2], [1.0, 1.0]);
+        assert_eq!(model.prims[0].uvs[6], [2.0, 2.0]);
     }
 
     #[test]

@@ -615,6 +615,11 @@ impl App {
                 let object = id.and_then(|id| self.zoom_focus_object(&id));
                 self.camera.zoom_to(p, object, &mut self.world.agent, &self.settings.camera);
             }
+            CtxAction::ZoomToObject { id, place } => {
+                if let Some(action) = ui::context::zoom_to_object(&self.world, &id, place, Instant::now()) {
+                    self.on_ctx_action(action);
+                }
+            }
             CtxAction::GoToAvatar(id) => self.travel_to_avatar(id, false),
             CtxAction::FollowAvatar(id) => self.travel_to_avatar(id, true),
             CtxAction::StopFollowing => self.stop_autopilot(true),

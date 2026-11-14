@@ -234,6 +234,17 @@ pub(super) fn menu(r: &egui::Response, p: &Palette, world: &World, url: &str, li
                     );
                 }
                 let place = object_place(&o.slurl);
+                // Url.ZoomInObject: the camera on the object, else its place
+                // on the map
+                if menu::item(ui, p, "zoom-in-filled", aurora_i18n::tr!("common-zoom")) {
+                    request(
+                        &ctx,
+                        CtxAction::ZoomToObject {
+                            id: o.id,
+                            place: place.as_ref().map(|l| (l.location.target(), l.location.pos)),
+                        },
+                    );
+                }
                 if menu::item_if(ui, p, "map", aurora_i18n::tr!("common-show-on-map"), place.is_some())
                     && let Some(l) = &place
                 {

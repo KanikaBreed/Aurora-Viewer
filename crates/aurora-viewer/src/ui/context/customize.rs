@@ -289,6 +289,7 @@ fn action_key(action: &CtxAction) -> String {
         CtxAction::Touch(..) => "Touch",
         CtxAction::Sit { .. } => "Sit",
         CtxAction::Zoom(..) => "Zoom",
+        CtxAction::ZoomToObject { .. } => "ZoomToObject",
         CtxAction::GoToAvatar(..) => "GoToAvatar",
         CtxAction::FollowAvatar(..) => "FollowAvatar",
         CtxAction::StopFollowing => "FollowAvatar",

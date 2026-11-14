@@ -4371,39 +4371,20 @@ fn bubble_sender_link(ctx: &egui::Context, p: &Palette, world: &World, k: usize,
 /// to inspect or to ignore it (the Legacy Viewer's objectim link of the name,
 /// LLViewerChat::getSenderSLURL).
 fn object_sender(resp: &egui::Response, p: &Palette, world: &World, line: &crate::world::ChatLine) {
-    let id = line.source;
-    let inspect = || {
-        CtxAction::AppLink(crate::slapp::AppLink::ObjectIm(world.chat_object(line).cloned().unwrap_or_else(
-            || crate::slapp::RemoteObject {
-                id,
-                name: line.from.clone(),
-                owner: uuid::Uuid::nil(),
-                group_owned: false,
-                slurl: String::new(),
-            },
-        )))
-    };
-    super::menu::context_menu(resp, p, |ui| {
-        if super::menu::item(ui, p, "zoom-scan-filled", aurora_i18n::tr!("ui-context-inspect-2")) {
-            super::context::request(ui.ctx(), inspect());
-        }
-        let (icon, label) = if world.mutes.is_muted_id(&id) {
-            ("circle-check-filled", aurora_i18n::tr!("common-stop-ignoring"))
-        } else {
-            ("ban", aurora_i18n::tr!("common-ignore"))
-        };
-        if super::menu::item(ui, p, icon, label) {
-            super::context::request(
-                ui.ctx(),
-                CtxAction::ToggleBlockObject {
-                    id,
-                    name: line.from.clone(),
-                },
-            );
-        }
+    let object = world.chat_object(line).cloned().unwrap_or_else(|| crate::slapp::RemoteObject {
+        id: line.source,
+        name: line.from.clone(),
+        owner: uuid::Uuid::nil(),
+        group_owned: false,
+        slurl: String::new(),
     });
+    // the name is the line's objectim link: its right click is
+    // menu_url_objectim.xml's (Object Profile, Block, Zoom in, Show on Map,
+    // Teleport to Object Location, Copy Object Name, Copy SLurl)
+    let link = crate::slapp::AppLink::ObjectIm(object.clone());
+    app_links::menu(resp, p, world, &object.url(), &link, &line.from);
     if resp.clicked() {
-        super::context::request(&resp.ctx, inspect());
+        super::context::request(&resp.ctx, CtxAction::AppLink(link));
     }
 }
 

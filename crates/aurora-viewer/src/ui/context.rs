@@ -332,6 +332,13 @@ pub enum CtxAction {
     /// Camera on the clicked point; it follows the resident given, the one
     /// clicked or wearing the clicked attachment (Tools.LookAtSelection "zoom").
     Zoom(Vec3, Option<Uuid>),
+    /// "Zoom in" on an object known by its id (Url.ZoomInObject): the
+    /// camera on it when it is loaded (handle_zoom_to_object), else its
+    /// place on the world map (LLObjectHandler "zoomin").
+    ZoomToObject {
+        id: Uuid,
+        place: Option<(String, Vec3)>,
+    },
     GoToAvatar(Uuid),
     FollowAvatar(Uuid),
     StopFollowing,
@@ -1631,9 +1638,54 @@ pub fn grid_link_confirm(ctx: &egui::Context, p: &Palette, address: &str, name: 
     answer
 }
 
+/// What "Zoom in" on an object does (Url.ZoomInObject, LLObjectHandler
+/// "zoomin" in indra/newview/llchatitemscontainerctrl.cpp): the camera on
+/// the object where it is drawn now (handle_zoom_to_object), else its place
+/// on the world map, else nothing.
+pub(crate) fn zoom_to_object(world: &World, id: &Uuid, place: Option<(String, Vec3)>, now: std::time::Instant) -> Option<CtxAction> {
+    let at = world
+        .objects
+        .index_of_uuid(id)
+        .and_then(|idx| crate::scene::Scene::object_transform(world, idx, now, 0))
+        .map(|xf| xf.0);
+    match (at, place) {
+        (Some(pos), _) => Some(CtxAction::Zoom(pos, Some(*id))),
+        (None, Some((region, pos))) => Some(CtxAction::ShowPlace(region, pos)),
+        (None, None) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zoom_on_an_object_frames_it_when_drawn_else_shows_its_place() {
+        let mut world = World::new(std::sync::Arc::new(crate::scene::avatar::AvatarLibrary::load()));
+        for event in crate::demo::events() {
+            world.apply(event);
+        }
+        let now = std::time::Instant::now();
+        let place = Some(("Far Away".to_string(), Vec3::new(10.0, 20.0, 30.0)));
+        // a demo object, drawn: the camera on it, following it
+        let (id, at) = world
+            .objects
+            .iter()
+            .find_map(|(idx, o)| crate::scene::Scene::object_transform(&world, idx, now, 0).map(|xf| (o.full_id, xf.0)))
+            .expect("a demo object");
+        match zoom_to_object(&world, &id, place.clone(), now) {
+            Some(CtxAction::Zoom(pos, Some(follow))) => assert_eq!((pos, follow), (at, id)),
+            other => panic!("{other:?}"),
+        }
+        // not loaded: its place on the map (LLObjectHandler "zoomin")
+        let gone = Uuid::from_u128(3602);
+        match zoom_to_object(&world, &gone, place, now) {
+            Some(CtxAction::ShowPlace(region, pos)) => assert_eq!((region.as_str(), pos), ("Far Away", Vec3::new(10.0, 20.0, 30.0))),
+            other => panic!("{other:?}"),
+        }
+        // neither: nothing
+        assert!(zoom_to_object(&world, &gone, None, now).is_none());
+    }
 
     #[test]
     fn remote_friend_menu_location_clicks_follow_live_received_rights() {

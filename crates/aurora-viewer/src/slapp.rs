@@ -56,6 +56,26 @@ pub struct RemoteObject {
     pub slurl: String,
 }
 
+impl RemoteObject {
+    /// Its `objectim` link, as LLViewerChat::getObjectImSLURL builds it
+    /// (indra/newview/llviewerchat.cpp): what Copy SLurl copies from an
+    /// object's name (Url.CopyUrl). `parse` reads it back.
+    pub fn url(&self) -> String {
+        let mut url = format!(
+            "secondlife:///app/objectim/{}?name={}&owner={}",
+            self.id,
+            crate::slurl::encode(&self.name),
+            self.owner
+        );
+        if self.group_owned {
+            url.push_str("&groupowned=true");
+        }
+        url.push_str("&slurl=");
+        url.push_str(&crate::slurl::encode(&self.slurl));
+        url
+    }
+}
+
 /// The commands the Legacy Viewer refuses from untrusted content
 /// (UNTRUSTED_BLOCK).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,6 +281,31 @@ mod tests {
 
     fn uid() -> Uuid {
         Uuid::parse_str(ID).expect("test id")
+    }
+
+    #[test]
+    fn an_objects_link_reads_back_as_the_same_object() {
+        // Copy SLurl on an object's name copies this link (Url.CopyUrl)
+        for o in [
+            RemoteObject {
+                id: uid(),
+                name: "Sign & Co = 100% (old)".into(),
+                owner: Uuid::from_u128(5),
+                group_owned: true,
+                slurl: "Far%20Away/10/20/30".into(),
+            },
+            RemoteObject {
+                id: uid(),
+                name: "Plain".into(),
+                owner: Uuid::nil(),
+                group_owned: false,
+                slurl: String::new(),
+            },
+        ] {
+            let url = o.url();
+            assert!(url.starts_with(&format!("secondlife:///app/objectim/{ID}?name=")), "{url}");
+            assert_eq!(parse(&url), Some(AppLink::ObjectIm(o)), "{url}");
+        }
     }
 
     #[test]

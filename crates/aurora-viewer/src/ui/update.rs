@@ -391,6 +391,14 @@ pub fn show_real(
                 }
                 State::Rollback => {
                     ui.label(RichText::new(aurora_i18n::tr!("update-rollback")).color(p.danger));
+                    // the helper's own words: what to tell, or to look at
+                    if let Some(reason) = &updater.rollback_reason {
+                        ui.label(
+                            RichText::new(aurora_i18n::tr!("update-rollback-reason", reason = reason.as_str()))
+                                .size(12.0)
+                                .color(p.muted),
+                        );
+                    }
                 }
                 _ => {}
             }
@@ -536,6 +544,7 @@ fn failure_text(kind: aurora_updater::Failure) -> &'static str {
         // macOS: an application to replace, not a folder to extract
         Failure::Unsupported if cfg!(target_os = "macos") => aurora_i18n::tr!("update-error-unsupported-macos"),
         Failure::Unsupported => aurora_i18n::tr!("update-error-unsupported"),
+        Failure::DriveRoot => aurora_i18n::tr!("update-error-drive-root"),
         Failure::Startup => aurora_i18n::tr!("update-error-startup"),
     }
 }

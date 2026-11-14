@@ -1520,12 +1520,12 @@ mod tests {
     use crate::build::ui::Shortcut;
 
     /// LLKeyboard names KEY_HOME "Home" (indra/llwindow/llkeyboard.cpp).
-    /// French keeps Origine. Japanese keyboards print Home.
+    /// French keyboards print Début. Japanese keyboards print Home.
     #[test]
     fn the_home_key_is_labelled_home() {
         assert_eq!(aurora_i18n::text_in("en", "keybinds-origin"), "Home");
         assert_eq!(aurora_i18n::text_in("ja", "keybinds-origin"), "Home");
-        assert_eq!(aurora_i18n::text_in("fr", "keybinds-origin"), "Origine");
+        assert_eq!(aurora_i18n::text_in("fr", "keybinds-origin"), "Début");
         assert_eq!(key_label("Home"), aurora_i18n::text_in(aurora_i18n::language(), "keybinds-origin"));
     }
 

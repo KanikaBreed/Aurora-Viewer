@@ -294,14 +294,22 @@ impl World {
     /// Empty the nearby chat (the "clear" command of the chat bar).
     pub fn clear_nearby_chat(&mut self) {
         self.chat.clear();
+        self.chat_objects.clear();
         self.chat_clock.renumbered();
     }
 
     /// A line of the nearby chat, written when the nearby chat is logged
     /// (LogNearbyChat). Instant messages shown there are not
-    /// (FSLogIMInChatHistory is off by default), those of objects are.
+    /// (FSLogIMInChatHistory is off by default), those of objects are; a
+    /// blocked resident's never (FSFloaterNearbyChat::addMessage returns
+    /// before logging a muted line).
     pub(super) fn log_nearby(&mut self, line: &ChatLine) {
-        if line.origin != Origin::Live || !self.chat_log.cfg.log_nearby || line.kind == ChatKind::Im || self.chat_log.identity().is_none() {
+        if line.origin != Origin::Live
+            || line.blocked
+            || !self.chat_log.cfg.log_nearby
+            || line.kind == ChatKind::Im
+            || self.chat_log.identity().is_none()
+        {
             return;
         }
         let (from, text) = self.transcript_text(line);
@@ -413,6 +421,8 @@ impl World {
                     kind,
                     source,
                     origin: Origin::Log,
+                    blocked: false,
+                    beyond_range: false,
                 }
             })
             .collect()
@@ -506,6 +516,8 @@ impl World {
                     kind: if mine { ChatKind::OWN } else { ChatKind::Im },
                     source: if mine { Uuid::nil() } else { h.from_id },
                     origin: Origin::ServerLog,
+                    blocked: false,
+                    beyond_range: false,
                 }
             })
             .collect();
@@ -710,6 +722,8 @@ mod tests {
             kind: ChatKind::Local(ChatType::Shout),
             source: Uuid::from_u128(2),
             origin: Origin::Live,
+            blocked: false,
+            beyond_range: false,
         });
         // ours, as the simulator echoes it, keeps its volume and its verb
         // (#1323)
@@ -719,6 +733,7 @@ mod tests {
             owner_id: w.agent_id,
             source_type: aurora_net::ChatSourceType::Agent,
             chat_type: ChatType::Whisper,
+            region: None,
             position: glam::Vec3::ZERO,
             message: "psst".into(),
         }));
@@ -904,6 +919,42 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, NetCommand::RequestOfflineMessagesLegacy))
         );
+        clean(&w, &root);
+    }
+
+    /// An empty block list comes back as the "emptymutelist" generic
+    /// message: offline messages are asked for at once, not after the
+    /// request's 30 s timeout.
+    #[test]
+    fn offline_messages_follow_an_empty_block_list_at_once() {
+        use aurora_net::NetCommand;
+        let root = temp();
+        let me = crate::demo::DEMO_AGENT;
+        let mut w = world(&root, me);
+        let asked = |w: &mut World| {
+            w.tick_social();
+            w.groups
+                .take_commands()
+                .iter()
+                .filter(|c| matches!(c, NetCommand::RequestOfflineMessages))
+                .count()
+        };
+        w.movement_complete = true;
+        let handle = 0x0003_E800_0003_E800;
+        w.main_region = Some(handle);
+        w.apply(aurora_net::NetEvent::Capabilities {
+            handle,
+            caps: Arc::new([("ReadOfflineMsgs".to_owned(), "x".to_owned())].into_iter().collect()),
+        });
+        w.apply(aurora_net::NetEvent::ObjectUpdates {
+            handle,
+            objects: vec![crate::demo::action_avatar(false)],
+        });
+        assert_eq!(asked(&mut w), 0);
+        assert!(matches!(w.mutes.state, crate::world::mutes::LoadState::Requested(_)));
+        w.apply(aurora_net::NetEvent::MuteList(aurora_net::MuteListSource::ServerEmpty));
+        assert_eq!(w.mutes.state, crate::world::mutes::LoadState::Loaded);
+        assert_eq!(asked(&mut w), 1);
         clean(&w, &root);
     }
 

@@ -329,10 +329,18 @@ impl Renderer {
         W: wgpu::rwh::HasWindowHandle + wgpu::rwh::HasDisplayHandle + Send + Sync + 'static,
     {
         crate::start_progress::enter(crate::start_progress::Phase::GpuDevice);
+        let validation = std::env::var_os("AURORA_GPU_VALIDATION").is_some();
+        let labels = gpu_labels_wanted(std::env::var("AURORA_GPU_LABELS").ok().as_deref());
+        let flags = gpu_instance_flags(validation, labels);
+        if labels && !validation {
+            log::info!(
+                "GPU labels: on (AURORA_GPU_LABELS): debug names on the passes and resources for Radeon GPU Detective, no validation layer"
+            );
+        }
         let desc = || {
             let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
             desc.backends = crate::BACKENDS;
-            desc.flags = gpu_instance_flags(std::env::var_os("AURORA_GPU_VALIDATION").is_some());
+            desc.flags = flags;
             desc
         };
         #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
@@ -2258,9 +2266,23 @@ fn texture_page_limit(limits: &wgpu::Limits, descriptors_in_all_pools: Option<u3
     }
 }
 
-fn gpu_instance_flags(validation: bool) -> wgpu::InstanceFlags {
+/// `AURORA_GPU_LABELS=1` (GPU-loss test builds): the debug names alone.
+fn gpu_labels_wanted(value: Option<&str>) -> bool {
+    value.is_some_and(|v| matches!(v.trim(), "1" | "on" | "yes" | "true"))
+}
+
+/// The instance's flags: `validation` (AURORA_GPU_VALIDATION, deep
+/// diagnostics) takes wgpu's debugging set, its validation layer included;
+/// `labels` alone takes DEBUG only, the names wgpu gives the Vulkan objects
+/// and passes (VK_EXT_debug_utils), which AMD's Radeon GPU Detective shows in
+/// its hang and page-fault reports, without the validation layer's cost and
+/// changes of timing. (wgpu also writes the shaders' debug names then:
+/// what they compute is the same.)
+fn gpu_instance_flags(validation: bool, labels: bool) -> wgpu::InstanceFlags {
     if validation {
         wgpu::InstanceFlags::debugging()
+    } else if labels {
+        wgpu::InstanceFlags::DEBUG
     } else {
         // No VALIDATION_INDIRECT_CALL: wgpu does not apply it to the GPU-culled
         // scene's multi_draw_indexed_indirect_count (cull.wgsl clamps those
@@ -2346,9 +2368,20 @@ mod tests {
 
     #[test]
     fn indirect_call_validation_is_left_to_debugging() {
-        assert!(!gpu_instance_flags(false).contains(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL));
-        assert!(!gpu_instance_flags(false).contains(wgpu::InstanceFlags::DEBUG));
-        assert!(gpu_instance_flags(true).contains(wgpu::InstanceFlags::DEBUG));
+        assert!(!gpu_instance_flags(false, false).contains(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL));
+        assert!(!gpu_instance_flags(false, false).contains(wgpu::InstanceFlags::DEBUG));
+        assert!(gpu_instance_flags(true, false).contains(wgpu::InstanceFlags::DEBUG));
+    }
+
+    /// AURORA_GPU_LABELS: the debug names only, no validation; with
+    /// AURORA_GPU_VALIDATION too, the full debugging set.
+    #[test]
+    fn labels_mode_takes_the_debug_names_without_validation() {
+        assert_eq!(gpu_instance_flags(false, true), wgpu::InstanceFlags::DEBUG);
+        assert!(!gpu_instance_flags(false, true).contains(wgpu::InstanceFlags::VALIDATION));
+        assert_eq!(gpu_instance_flags(true, true), wgpu::InstanceFlags::debugging());
+        assert!(gpu_labels_wanted(Some("1")) && gpu_labels_wanted(Some(" on ")));
+        assert!(!gpu_labels_wanted(None) && !gpu_labels_wanted(Some("0")) && !gpu_labels_wanted(Some("")));
     }
 
     #[test]

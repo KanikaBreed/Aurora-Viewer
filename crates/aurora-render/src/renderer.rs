@@ -8033,7 +8033,7 @@ impl Backend {
         // command buffer of the frame's submit. Done even when the frame
         // cannot be drawn.
         let t_writes = Instant::now();
-        let (recorded, counts) = (writes.bytes(), writes.counts());
+        let (recorded, counts, largest_write) = (writes.bytes(), writes.counts(), writes.largest() as u64);
         // its buffer writes copied from one staging buffer (write_staging.rs)
         let mut queue_sink = TrackedSink {
             queue: &self.queue,
@@ -12103,6 +12103,12 @@ impl Backend {
             shadow_draws: stats.shadow_draws,
             triangles: stats.triangles,
             gpu_cull: stats.gpu_cull,
+            largest_upload_bytes: frame_uploads.largest.0.max(largest_write),
+            largest_upload_kind: if largest_write > frame_uploads.largest.0 {
+                crate::frame_log::UploadKind::Write
+            } else {
+                frame_uploads.largest.1
+            },
             ..Default::default()
         });
         self.gpu_frames.submitted(index, submission);

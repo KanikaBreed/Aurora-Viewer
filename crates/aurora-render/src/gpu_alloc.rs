@@ -29,7 +29,11 @@ pub fn try_buffer(device: &wgpu::Device, desc: &wgpu::BufferDescriptor) -> Resul
     let invalid = pollster::block_on(invalid.pop());
     let oom = pollster::block_on(oom.pop());
     match invalid.or(oom) {
-        None => Ok(buffer),
+        None => {
+            // a growable buffer made or made again larger (frame_log.rs)
+            crate::frame_log::note_buffer(desc.size);
+            Ok(buffer)
+        }
         Some(e) => Err(reason(&e.to_string())),
     }
 }

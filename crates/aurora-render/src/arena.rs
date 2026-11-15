@@ -457,6 +457,8 @@ impl GeometryArena {
                 }
             }
         };
+        // (for the frames before a GPU loss, frame_log.rs)
+        crate::frame_log::note_mesh();
         Some(MeshAlloc {
             vertex_offset: voff,
             vertex_count: vcount,
@@ -509,6 +511,7 @@ impl GeometryArena {
     ) -> Option<MeshAlloc> {
         let m = self.reserve(device, writes, uploads, mesh.vertex_count, mesh.index_count)?;
         let [vertices, skin, indices] = mesh.ranges();
+        uploads.note_upload(crate::frame_log::UploadKind::Mesh, vertices.1 + skin.1 + indices.1);
         let voff = m.vertex_offset as u64;
         uploads.copy_to_buffer(device, &mesh.data, vertices, &self.vertex_buffer, voff * VERTEX_SIZE);
         uploads.copy_to_buffer(device, &mesh.data, skin, &self.skin_buffer, voff * SKIN_SIZE);

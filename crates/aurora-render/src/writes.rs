@@ -153,6 +153,19 @@ impl<B: Clone, T: Clone, E> Journal<B, T, E> {
             .sum()
     }
 
+    /// The largest single write recorded since the last replay, in bytes
+    /// (diagnostics, frame_log.rs).
+    pub fn largest(&self) -> usize {
+        self.ops
+            .iter()
+            .map(|op| match op {
+                Op::Buffer { data, .. } | Op::Texture { data, .. } => data.len(),
+                Op::Submit(_) => 0,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Recorded buffer writes, texture writes and submits (diagnostics).
     pub fn counts(&self) -> [usize; 3] {
         let mut n = [0; 3];
@@ -301,6 +314,8 @@ mod tests {
         j.write_buffer(&2, 32, &[5, 6]);
         j.write_texture(&7, texel(3), &[9; 8]);
         assert_eq!(j.bytes(), 14);
+        // the largest single write, for the frames before a GPU loss
+        assert_eq!(j.largest(), 8);
         let mut r = Recorder::default();
         j.replay(&mut r);
         assert_eq!(
@@ -322,6 +337,7 @@ mod tests {
         j.replay(&mut r);
         assert!(j.is_empty());
         assert_eq!(j.bytes(), 0);
+        assert_eq!(j.largest(), 0);
         // the next frame starts from offset 0 of the same memory
         let cap = j.data.capacity();
         j.write_buffer(&2, 8, &[2; 64]);

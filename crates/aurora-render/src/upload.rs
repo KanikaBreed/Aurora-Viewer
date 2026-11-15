@@ -680,6 +680,8 @@ pub struct UploadQueue {
     /// (frame_log.rs).
     copies: u32,
     bytes: u64,
+    /// The largest single upload since then, and its kind (frame_log.rs).
+    largest: (u64, crate::frame_log::UploadKind),
 }
 
 impl UploadQueue {
@@ -693,6 +695,7 @@ impl UploadQueue {
             encoder: None,
             copies: 0,
             bytes: 0,
+            largest: (0, crate::frame_log::UploadKind::None),
         }
     }
 
@@ -727,15 +730,26 @@ impl UploadQueue {
         self.encoder(device).copy_buffer_to_buffer(&src, offset, dst, dst_offset, size);
     }
 
+    /// One upload of `bytes` (a whole texture or mesh) for the frame's
+    /// largest (frame_log.rs).
+    pub fn note_upload(&mut self, kind: crate::frame_log::UploadKind, bytes: u64) {
+        if bytes > self.largest.0 {
+            self.largest = (bytes, kind);
+        }
+    }
+
     /// Copy staged levels into `layer` of a texture array, level `i` of the
     /// chain into mip `i`.
     pub fn copy_to_layer(&mut self, device: &wgpu::Device, staged: &StagedTexture, texture: &wgpu::Texture, layer: u32, count: u32) {
         let src = staged.data.buffer().clone();
         let base = staged.data.offset;
+        let mut texture_bytes = 0u64;
         for l in staged.levels.iter().take(count as usize) {
             self.copies = self.copies.saturating_add(1);
-            self.bytes = self.bytes.saturating_add(staged.format.level_bytes(l.width, l.height));
+            texture_bytes = texture_bytes.saturating_add(staged.format.level_bytes(l.width, l.height));
         }
+        self.bytes = self.bytes.saturating_add(texture_bytes);
+        self.note_upload(crate::frame_log::UploadKind::Texture, texture_bytes);
         let enc = self.encoder(device);
         for (i, l) in staged.levels.iter().take(count as usize).enumerate() {
             let (width, height) = staged.format.copy_extent(l.width, l.height);
@@ -780,6 +794,7 @@ impl UploadQueue {
             returned: self.pool.returned.clone(),
             copies: std::mem::take(&mut self.copies),
             bytes: std::mem::take(&mut self.bytes),
+            largest: std::mem::replace(&mut self.largest, (0, crate::frame_log::UploadKind::None)),
         }
     }
 }
@@ -792,6 +807,8 @@ pub struct FrameUploads {
     /// The streamed copies of the frame and their bytes (frame_log.rs).
     pub copies: u32,
     pub bytes: u64,
+    /// The largest single upload of the frame and its kind.
+    pub largest: (u64, crate::frame_log::UploadKind),
 }
 
 impl FrameUploads {
@@ -804,6 +821,7 @@ impl FrameUploads {
             returned: self.returned.clone(),
             copies: 0,
             bytes: 0,
+            largest: (0, crate::frame_log::UploadKind::None),
         }
     }
     /// The recorded copies: first command buffer of the frame's submit.
@@ -959,8 +977,13 @@ mod tests {
                 uploads.copy_to_buffer(&device, region, (0, REGION as u64), &dst, (i * REGION) as u64);
             }
             drop(staged);
+            // the frame's largest upload (frame_log.rs): copies of regions
+            // are no upload of their own, the callers name theirs
+            uploads.note_upload(crate::frame_log::UploadKind::Mesh, 5 << 20);
+            uploads.note_upload(crate::frame_log::UploadKind::Texture, 3 << 20);
             // a frame: the copies are submitted, the emptied chunks mapped again
             let mut frame = uploads.take_frame();
+            assert_eq!(frame.largest, (5 << 20, crate::frame_log::UploadKind::Mesh));
             queue.submit(frame.take_commands());
             frame.after_submit();
             dst.map_async(wgpu::MapMode::Read, .., |r| r.expect("map"));

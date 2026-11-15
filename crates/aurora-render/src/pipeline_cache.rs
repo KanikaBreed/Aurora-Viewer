@@ -317,6 +317,8 @@ fn made(label: Option<&str>, took: Duration) {
         s.slowest.truncate(3);
     }
     crate::start_progress::pipeline_made();
+    // the frame's share and the recent labels, for a GPU loss (frame_log.rs)
+    crate::frame_log::note_pipeline(label);
     *DIRTY.lock() = Some(Instant::now());
     WAKE.notify_one();
 }

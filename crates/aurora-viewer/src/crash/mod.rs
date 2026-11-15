@@ -429,7 +429,12 @@ fn write_gpu_frames(dir: &Path) {
     let Some(lines) = aurora_render::frame_log::frozen() else {
         return;
     };
-    let text: String = lines.iter().map(|line| line.encode() + "\n").collect();
+    let mut text: String = lines.iter().map(|line| line.encode() + "\n").collect();
+    // the pipelines made in the seconds before the loss, after the frames
+    for pipeline in aurora_render::frame_log::frozen_pipelines() {
+        text.push_str(&pipeline.encode());
+        text.push('\n');
+    }
     let _ = crate::atomic_file::publish(&path, text.as_bytes());
 }
 

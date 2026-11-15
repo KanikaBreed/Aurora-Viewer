@@ -394,17 +394,30 @@ const GPU_FRAMES_SHOWN: usize = 12;
 
 /// The section of the frames submitted before the first GPU loss
 /// (gpu-frames.txt, aurora_render::frame_log): numbers only, every line
-/// checked; anything else in the file is ignored.
+/// checked; anything else in the file is ignored. The pipelines made in the
+/// seconds before the loss (their `pipeline` lines, labels filtered again)
+/// are listed once under the table.
 fn gpu_frames(text: &str) -> Option<String> {
-    use aurora_render::frame_log::FrameLine;
+    use aurora_render::frame_log::{FrameLine, RecentPipeline, UploadKind};
     let lines: Vec<FrameLine> = text.lines().take(512).filter_map(FrameLine::decode).collect();
     if lines.is_empty() {
         return None;
     }
+    let pipelines: Vec<RecentPipeline> = text.lines().take(600).filter_map(RecentPipeline::decode).take(32).collect();
     let mb = |bytes: u64| format!("{:.1}", bytes as f64 / (1024.0 * 1024.0));
     let row = |label: String, l: &FrameLine| {
+        let buffers = if l.buffers_made == 0 {
+            "0".to_owned()
+        } else {
+            format!("{} ({})", l.buffers_made, mb(l.largest_buffer_bytes))
+        };
+        let upload = if l.largest_upload_kind == UploadKind::None {
+            "-".to_owned()
+        } else {
+            format!("{} {}", mb(l.largest_upload_bytes), l.largest_upload_kind.word())
+        };
         format!(
-            "| {label} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {label} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {buffers} | {upload} | {} |\n",
             l.upload_copies,
             mb(l.upload_bytes),
             l.write_buffers,
@@ -414,13 +427,16 @@ fn gpu_frames(text: &str) -> Option<String> {
             l.bind_group_rebuilds,
             l.draws,
             l.shadow_draws,
-            if l.gpu_cull { "GPU" } else { "CPU" }
+            if l.gpu_cull { "GPU" } else { "CPU" },
+            l.pipelines,
+            l.texture_pages,
+            l.meshes_added,
         )
     };
     let mut out = format!(
         "\n### Frames before the GPU loss\n\nThe work of each frame submitted in the last {:.1} s before the loss ({} frames; the last {} shown, newest last).\n\n\
-         | Frame (s before loss) | Copies | Copied MB | Buffer writes | Texture writes | Extra submits | Written MB | Texture-table rebuilds | Draws | Shadow draws | Lists |\n\
-         |---|---|---|---|---|---|---|---|---|---|---|\n",
+         | Frame (s before loss) | Copies | Copied MB | Buffer writes | Texture writes | Extra submits | Written MB | Texture-table rebuilds | Draws | Shadow draws | Lists | Pipelines made | Texture pages made | Buffers made (largest MB) | Largest upload (MB, kind) | Meshes added |\n\
+         |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
         lines.first().map_or(0.0, |l| l.before_loss_ms as f32 / 1000.0),
         lines.len(),
         GPU_FRAMES_SHOWN.min(lines.len()),
@@ -428,20 +444,55 @@ fn gpu_frames(text: &str) -> Option<String> {
     for l in &lines[lines.len().saturating_sub(GPU_FRAMES_SHOWN)..] {
         out.push_str(&row(format!("{} ({:.2})", l.frame, l.before_loss_ms as f32 / 1000.0), l));
     }
-    let largest = lines.iter().fold(FrameLine::default(), |m, l| FrameLine {
-        upload_copies: m.upload_copies.max(l.upload_copies),
-        upload_bytes: m.upload_bytes.max(l.upload_bytes),
-        write_buffers: m.write_buffers.max(l.write_buffers),
-        write_textures: m.write_textures.max(l.write_textures),
-        write_submits: m.write_submits.max(l.write_submits),
-        write_bytes: m.write_bytes.max(l.write_bytes),
-        bind_group_rebuilds: m.bind_group_rebuilds.max(l.bind_group_rebuilds),
-        draws: m.draws.max(l.draws),
-        shadow_draws: m.shadow_draws.max(l.shadow_draws),
-        gpu_cull: m.gpu_cull || l.gpu_cull,
-        ..FrameLine::default()
+    let largest = lines.iter().fold(FrameLine::default(), |m, l| {
+        let upload = if l.largest_upload_bytes > m.largest_upload_bytes || m.largest_upload_kind == UploadKind::None {
+            (l.largest_upload_bytes, l.largest_upload_kind)
+        } else {
+            (m.largest_upload_bytes, m.largest_upload_kind)
+        };
+        FrameLine {
+            upload_copies: m.upload_copies.max(l.upload_copies),
+            upload_bytes: m.upload_bytes.max(l.upload_bytes),
+            write_buffers: m.write_buffers.max(l.write_buffers),
+            write_textures: m.write_textures.max(l.write_textures),
+            write_submits: m.write_submits.max(l.write_submits),
+            write_bytes: m.write_bytes.max(l.write_bytes),
+            bind_group_rebuilds: m.bind_group_rebuilds.max(l.bind_group_rebuilds),
+            draws: m.draws.max(l.draws),
+            shadow_draws: m.shadow_draws.max(l.shadow_draws),
+            gpu_cull: m.gpu_cull || l.gpu_cull,
+            pipelines: m.pipelines.max(l.pipelines),
+            texture_pages: m.texture_pages.max(l.texture_pages),
+            buffers_made: m.buffers_made.max(l.buffers_made),
+            largest_buffer_bytes: m.largest_buffer_bytes.max(l.largest_buffer_bytes),
+            largest_upload_bytes: upload.0,
+            largest_upload_kind: upload.1,
+            meshes_added: m.meshes_added.max(l.meshes_added),
+            ..FrameLine::default()
+        }
     });
     out.push_str(&row("largest of all kept".to_owned(), &largest));
+    let total = |f: fn(&FrameLine) -> u32| lines.iter().map(|l| u64::from(f(l))).sum::<u64>();
+    out.push_str(&format!(
+        "\nIn all {:.1} s kept: {} pipelines made, {} texture pages made, {} buffers made, {} meshes added.\n",
+        lines.first().map_or(0.0, |l| l.before_loss_ms as f32 / 1000.0),
+        total(|l| l.pipelines),
+        total(|l| l.texture_pages),
+        total(|l| l.buffers_made),
+        total(|l| l.meshes_added),
+    ));
+    if pipelines.is_empty() {
+        out.push_str("\nPipelines made in the last 4 s before the loss: none.\n");
+    } else {
+        let list: Vec<String> = pipelines
+            .iter()
+            .map(|p| format!("{} ({:.2} s)", p.label, p.before_loss_ms as f32 / 1000.0))
+            .collect();
+        out.push_str(&format!(
+            "\nPipelines made in the last 4 s before the loss (s before it, oldest first): {}.\n",
+            list.join(", ")
+        ));
+    }
     Some(out)
 }
 
@@ -1582,16 +1633,42 @@ mod tests {
             ));
         }
         text.push_str("private-user-path 1 2\n");
-        text.push_str("42848 0 812 34603008 4100 12 2 9437184 1 3120 900 4200000 1\n");
+        // a frame of build 4, with its streaming events
+        text.push_str("42848 0 812 34603008 4100 12 2 9437184 1 3120 900 4200000 1 3 2 1 268435456 23068672 1 140\n");
+        text.push_str("pipeline 1500 cull classify\n");
+        text.push_str("pipeline 20 C:\\Users\\someone/x\n");
+        text.push_str("pipeline x gtao\n");
         std::fs::write(dir.join(super::super::GPU_FRAMES_FILE), text).unwrap();
         let body = build(&record, &dir).body;
         assert!(body.contains("### Frames before the GPU loss"), "{body}");
         assert!(body.contains("(21 frames; the last 12 shown"), "{body}");
         assert!(
-            body.contains("| 42848 (0.00) | 812 | 33.0 | 4100 | 12 | 2 | 9.0 | 1 | 3120 | 900 | GPU |"),
+            body.contains(
+                "| 42848 (0.00) | 812 | 33.0 | 4100 | 12 | 2 | 9.0 | 1 | 3120 | 900 | GPU | 3 | 2 | 1 (256.0) | 22.0 texture | 140 |"
+            ),
+            "{body}"
+        );
+        // a line of build 3: the events left empty
+        assert!(
+            body.contains("| 42847 (0.10) | 10 | 1.0 | 4 | 2 | 0 | 2.0 | 0 | 3000 | 900 | GPU | 0 | 0 | 0 | - | 0 |"),
             "{body}"
         );
         assert!(body.contains("| largest of all kept | 812 | 33.0 |"), "{body}");
+        assert!(
+            body.contains(
+                "| largest of all kept | 812 | 33.0 | 4100 | 12 | 2 | 9.0 | 1 | 3120 | 900 | GPU | 3 | 2 | 1 (256.0) | 22.0 texture | 140 |"
+            ),
+            "{body}"
+        );
+        assert!(
+            body.contains("3 pipelines made, 2 texture pages made, 1 buffers made, 140 meshes added."),
+            "{body}"
+        );
+        assert!(
+            body.contains("Pipelines made in the last 4 s before the loss (s before it, oldest first): cull classify (1.50 s), C:_Users_someone_x (0.02 s)."),
+            "{body}"
+        );
+        assert!(!body.contains("someone/x"));
         assert!(!body.contains("42828 ("), "older frames are summed up, not listed");
         assert!(!body.contains("private-user-path"));
         let _ = std::fs::remove_dir_all(dir);

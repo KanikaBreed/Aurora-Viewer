@@ -341,7 +341,10 @@ fn make_page(device: &wgpu::Device, key: PageKey, layers: u32, integrated: bool)
         dimension: Some(wgpu::TextureViewDimension::D2Array),
         ..Default::default()
     };
-    crate::gpu_alloc::try_texture(device, &desc, &view, layers as u64 * key.layer_bytes(), integrated)
+    let page = crate::gpu_alloc::try_texture(device, &desc, &view, layers as u64 * key.layer_bytes(), integrated)?;
+    // (for the frames before a GPU loss, frame_log.rs)
+    crate::frame_log::note_texture_page();
+    Ok(page)
 }
 
 const NO_SLOT: u32 = u32::MAX;

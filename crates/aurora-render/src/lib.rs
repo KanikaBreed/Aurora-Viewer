@@ -37,6 +37,7 @@ pub mod hud;
 mod label_depth;
 pub mod light_tiles;
 pub mod looks;
+pub mod loss_probe;
 pub mod main_thread;
 mod motion_debug;
 mod motion_history;

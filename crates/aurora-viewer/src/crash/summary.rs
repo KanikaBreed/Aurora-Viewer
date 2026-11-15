@@ -245,6 +245,27 @@ fn build_at(record: &super::Record, dir: &Path, boot_unix: Option<u64>) -> Summa
                 .unwrap_or_else(|| "not collected: operating system collection unavailable".into()),
         ));
     }
+    // test build #2970: the driver's own view of the loss, why the
+    // recovery failed, and the window images the test wgpu rebuilt
+    if let Some(answer) = fixed_last(
+        &tail,
+        " ERROR aurora_render::loss_probe",
+        "] GPU loss probe: ",
+        &aurora_render::loss_probe::ANSWERS,
+    ) {
+        rows.push(("Driver's answer after the loss", answer.to_owned()));
+    }
+    if let Some(kind) = fixed_last(
+        &tail,
+        " ERROR aurora_viewer::app::gpu_recovery",
+        "] GPU recovery failed: ",
+        &super::RECOVERY_FAILURES,
+    ) {
+        rows.push(("GPU recovery", format!("failed: {kind}")));
+    }
+    if let Some(count) = refusals_in(&tail) {
+        rows.push(("Window images refused by the driver and rebuilt (test build)", count.to_string()));
+    }
     if let Some(xr) = xr_runtime_in(&head, &tail) {
         rows.push(("XR runtime", xr));
     }
@@ -1089,6 +1110,26 @@ fn overlay_hooks(text: &str) -> Option<String> {
 /// The start of the session log (the GPU line) and its end (the last
 /// warnings); a long session's log is never read whole.
 /// What follows `marker` on the first line of the log that has it.
+/// Test build #2970: the last line of `module` (level included, as the
+/// log writes it) after `marker`, when its text is one of `allowed`.
+fn fixed_last<'a>(log: &str, module: &str, marker: &str, allowed: &[&'a str]) -> Option<&'a str> {
+    log.lines()
+        .filter_map(|line| line.split_once(marker))
+        .filter(|(head, _)| head.ends_with(module))
+        .filter_map(|(_, text)| allowed.iter().find(|a| **a == text.trim()).copied())
+        .next_back()
+}
+
+/// Test build #2970: the highest count of window images the test wgpu
+/// rebuilt instead of losing the device.
+fn refusals_in(log: &str) -> Option<u32> {
+    log.lines()
+        .filter_map(|line| line.split_once("] window images refused by the driver and rebuilt: "))
+        .filter(|(head, _)| head.ends_with(" WARN  aurora_viewer::app::gpu_stall"))
+        .filter_map(|(_, n)| n.trim().parse::<u32>().ok())
+        .max()
+}
+
 fn logged<'a>(log: &'a str, marker: &str) -> Option<&'a str> {
     log.lines().find_map(|line| line.split_once(marker)).map(|(_, value)| value)
 }
@@ -2231,5 +2272,36 @@ mod tests {
         assert!(body.contains("unexpected Vulkan result (code not kept by wgpu-hal)"), "{body}");
         assert!(!body.contains("| GPU loss: what the message is about | other |"), "{body}");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_test_build_rows_take_fixed_words_only() {
+        let log = "[t ERROR aurora_render::loss_probe] GPU loss probe: the driver still runs the device (VK_SUCCESS)\n\
+[t WARN  aurora_viewer::world::chat] object said \"x] GPU loss probe: the driver lost the device too (VK_ERROR_DEVICE_LOST)\"\n\
+[t ERROR aurora_render::loss_probe] GPU loss probe: something a name could say\n\
+[t ERROR aurora_viewer::app::gpu_recovery] GPU recovery failed: the driver refused a new device\n\
+[t WARN  aurora_viewer::app::gpu_stall] window images refused by the driver and rebuilt: 3\n\
+[t WARN  aurora_viewer::app::gpu_stall] window images refused by the driver and rebuilt: 12\n\
+[t WARN  aurora_viewer::world] window images refused by the driver and rebuilt: 99\n";
+        assert_eq!(
+            fixed_last(
+                log,
+                " ERROR aurora_render::loss_probe",
+                "] GPU loss probe: ",
+                &aurora_render::loss_probe::ANSWERS
+            ),
+            Some("the driver still runs the device (VK_SUCCESS)")
+        );
+        assert_eq!(
+            fixed_last(
+                log,
+                " ERROR aurora_viewer::app::gpu_recovery",
+                "] GPU recovery failed: ",
+                &super::super::RECOVERY_FAILURES
+            ),
+            Some("the driver refused a new device")
+        );
+        assert_eq!(refusals_in(log), Some(12));
+        assert_eq!(refusals_in("nothing"), None);
     }
 }

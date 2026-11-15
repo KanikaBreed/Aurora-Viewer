@@ -64,12 +64,39 @@ fn notice_due(stalled: Duration, shown: bool, waited_at: Option<Instant>, now: I
     !shown && stalled >= NOTICE_AFTER && waited_at.is_none_or(|at| now.duration_since(at) >= NOTICE_AGAIN)
 }
 
+/// Test build #2970: the refusals already said (`loss_probe::acquire_refusals`).
+static REFUSALS_SEEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 impl App {
     /// Each frame, after the renderer was asked for one.
     pub(super) fn gpu_stall_frame(&mut self, renderer: &aurora_render::Renderer) {
         let now = Instant::now();
         // a VR session is not recovered yet (TASKS.md): it closes as before
         let recovers = super::gpu_recovery::enabled(self.settings.gpu_recovery) && !renderer.vr_engaged();
+        // test build #2970: does the driver itself see the device lost?
+        // (once per loss: `lost` is set below on both paths; up to 3 s)
+        if renderer.device_lost() && !self.gpu_stall.lost {
+            aurora_render::loss_probe::probe(&renderer.device);
+        }
+        // test build #2970: window images the driver refused ("out of
+        // memory" at the acquire) that the test wgpu rebuilt instead of
+        // losing the device. The tester is told, the first time and then
+        // every tenth, so that they can say so on the issue.
+        let refused = aurora_render::loss_probe::acquire_refusals();
+        let seen = REFUSALS_SEEN.swap(refused, std::sync::atomic::Ordering::Relaxed);
+        if refused > seen {
+            log::warn!("window images refused by the driver and rebuilt: {refused}");
+            if seen == 0 || refused / 10 > seen / 10 {
+                self.world.notifications.push(
+                    crate::world::notifications::Kind::Alert,
+                    "Test build: the graphics driver refused a window image",
+                    format!(
+                        "This is what used to end the session with \"GPU device lost\" (#2970). The test build rebuilt the window instead and carried on ({refused} so far). Please say so on issue #2970, with your desktop (Wayland or X11)."
+                    ),
+                    crate::world::notifications::Data::None,
+                );
+            }
+        }
         if renderer.device_lost() && recovers && !self.gpu_stall.lost {
             crate::crash::gpu_loss_snapshot();
             use super::gpu_recovery::LossStep;

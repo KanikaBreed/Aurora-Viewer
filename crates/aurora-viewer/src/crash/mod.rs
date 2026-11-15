@@ -25,6 +25,16 @@ pub(crate) use summary::state_value as summary_state_value;
 pub(crate) use watchdog::WINDOW_STATES;
 pub use watchdog::{State, note as note_state, pumped, watch_window};
 
+/// Test build #2970: why a GPU recovery failed, in fixed words the report
+/// publishes (app/gpu_recovery.rs logs them, summary.rs reads them).
+pub const RECOVERY_FAILURES: [&str; 5] = [
+    "no new window",
+    "no graphics card offered (no adapter)",
+    "the driver refused a new device",
+    "the new window's surface was refused",
+    "the new device was lost while it was made",
+];
+
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;

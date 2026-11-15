@@ -154,6 +154,16 @@ fn parse_forced(value: Option<&str>) -> Option<bool> {
     }
 }
 
+fn recovery_failure(error: &aurora_render::RenderError) -> &'static str {
+    use aurora_render::RenderError;
+    match error {
+        RenderError::NoAdapter(_) => crate::crash::RECOVERY_FAILURES[1],
+        RenderError::Device(_) => crate::crash::RECOVERY_FAILURES[2],
+        RenderError::Surface(_) => crate::crash::RECOVERY_FAILURES[3],
+        RenderError::DeviceLost => crate::crash::RECOVERY_FAILURES[4],
+    }
+}
+
 impl App {
     /// Before the lost renderer goes: what the scene and the app hold on it.
     fn forget_gpu_scene(&mut self, old: &mut Renderer) {
@@ -221,6 +231,7 @@ impl App {
             Ok(w) => w,
             Err(e) => {
                 log::error!("GPU recovery: cannot create a window: {e}");
+                log::error!("GPU recovery failed: {}", crate::crash::RECOVERY_FAILURES[0]);
                 return false;
             }
         };
@@ -228,6 +239,7 @@ impl App {
             Ok(r) => r,
             Err(e) => {
                 log::error!("GPU recovery: no new renderer: {e}");
+                log::error!("GPU recovery failed: {}", recovery_failure(&e));
                 return false;
             }
         };

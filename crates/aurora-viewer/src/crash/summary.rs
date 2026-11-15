@@ -267,6 +267,11 @@ fn build_at(record: &super::Record, dir: &Path, boot_unix: Option<u64>) -> Summa
     if record.demo {
         rows.push(("Demo session", "yes".into()));
     }
+    // the render and test switches the session ran with (GPU-loss test
+    // builds): noted at its start, checked again here
+    if dir.join(super::test_switches::FILE).exists() {
+        rows.push(("Test switches", super::test_switches::row(&text(super::test_switches::FILE))));
+    }
     for phase in ["start", "loss"] {
         let path = dir.join(format!("environment-{phase}.json"));
         let snapshot = super::read_limited(&path, 512 * 1024)
@@ -1618,6 +1623,28 @@ mod tests {
         assert!(!body.contains("0x12345678"));
         std::fs::write(dir.join("gpu-breadcrumbs.txt"), "v1 private-user-path").unwrap();
         assert!(!build(&record, &dir).body.contains("GPU breadcrumbs"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The session's render and test switches: a row, "none" when the file
+    /// is empty, no row when the session noted none (an older build).
+    #[test]
+    fn the_test_switches_are_a_row_of_allowed_names() {
+        let (dir, record) = session();
+        assert!(!build(&record, &dir).body.contains("| Test switches |"));
+        std::fs::write(dir.join(super::super::test_switches::FILE), "").unwrap();
+        assert!(build(&record, &dir).body.contains("| Test switches | none |"));
+        std::fs::write(
+            dir.join(super::super::test_switches::FILE),
+            "AURORA_GPU_LABELS=1\nAURORA_TEST_SLOW_UPLOADS=1\nAURORA_LOG_NAME=private-name\nAURORA_VULKAN_DRIVERS=C:\\private-user-path\n",
+        )
+        .unwrap();
+        let body = build(&record, &dir).body;
+        assert!(
+            body.contains("| Test switches | AURORA_GPU_LABELS=1, AURORA_TEST_SLOW_UPLOADS=1, AURORA_VULKAN_DRIVERS=set |"),
+            "{body}"
+        );
+        assert!(!body.contains("private-name") && !body.contains("private-user-path"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

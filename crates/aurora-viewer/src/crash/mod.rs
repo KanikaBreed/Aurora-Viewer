@@ -19,6 +19,7 @@ pub mod privacy;
 // mod report;
 pub(crate) mod software;
 mod summary;
+mod test_switches;
 mod threads;
 mod watchdog;
 mod window;
@@ -281,6 +282,7 @@ fn start_inner() -> anyhow::Result<()> {
         panic_file,
     });
     environment::start(&dir);
+    test_switches::note(&dir);
     flight_recorder::start();
     aurora_render::gpu_diagnostics::set_sink(|report, private| {
         save_gpu_diagnostics(report);
